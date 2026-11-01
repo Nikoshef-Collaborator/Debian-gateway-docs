@@ -15,7 +15,8 @@ amz_dev(){ ip route get 1.1.1.1 from "$LANIP" iif lan mark 0x200 2>&1 | grep -oE
 hs_age(){ local t; t=$(awg show "$1" latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
           if [ -n "$t" ] && [ "$t" != 0 ]; then echo $(( $(date +%s) - t )); else echo 99999; fi; }
 ts_on(){ tailscale status --json 2>/dev/null | jq -r '.Self.Online' 2>/dev/null; }
-dns_ok(){ dig +short +time=2 +tries=1 example.com @127.0.0.1 2>/dev/null | grep -q .; }
+# только настоящий адрес: при ошибке dig +short пишет в stdout ";; communications error" (учения: ложное "ok")
+dns_ok(){ dig +short +time=2 +tries=1 example.com @127.0.0.1 2>/dev/null | grep -qE '^[0-9]+(\.[0-9]+){3}$'; }
 snap(){ log "    lan=$(lan_dev) amz=$(amz_dev) ts=$(ts_on) hs: main=$(hs_age vpn-main) backup=$(hs_age vpn-backup) amz=$(hs_age vpn-amz) ts->tun=$(ip rule show priority 5200 | wc -l) dns=$(dns_ok && echo ok || echo НЕТ)"; }
 wait_for(){  # описание, секунд, условие -> 0 если дождались
     local desc=$1 lim=$2 cond=$3 t=0
