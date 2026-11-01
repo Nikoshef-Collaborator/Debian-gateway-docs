@@ -1,0 +1,5 @@
+Types: deb deb-src
+URIs: https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu
+Suites: focal
+Components: main
+Signed-By: /usr/share/keyrings/amnezia.gpg

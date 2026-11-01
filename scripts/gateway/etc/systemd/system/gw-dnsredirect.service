@@ -1,0 +1,13 @@
+[Unit]
+Description=Force LAN DNS to local dnsmasq (anti-spoof redirect)
+After=dnsmasq.service
+Wants=dnsmasq.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/gw-dnsredirect.nft
+ExecStop=/usr/sbin/nft delete table ip gw_dnsredirect
+
+[Install]
+WantedBy=multi-user.target

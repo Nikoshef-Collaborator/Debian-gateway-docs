@@ -1,0 +1,12 @@
+[Unit]
+Description=netwatch: log connectivity changes of gateway paths
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/sbin/netwatch.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

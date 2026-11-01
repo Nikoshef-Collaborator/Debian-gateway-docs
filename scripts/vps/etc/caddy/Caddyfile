@@ -1,0 +1,50 @@
+# Общие заголовки безопасности
+(security) {
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+    log
+}
+
+# Основной сайт
+example.com {
+    import security
+    root * /var/www/site
+    encode zstd gzip
+    # скрытые файлы (.git, .env и т.п.) - не отдавать
+    @hidden path */.*
+    respond @hidden 404
+    # картинки, стили, скрипты - кэш в браузере на неделю
+    @static path *.jpg *.jpeg *.png *.webp *.gif *.svg *.css *.js
+    header @static Cache-Control "public, max-age=604800"
+    file_server
+    # своя страница "не найдено"
+    handle_errors {
+        @notfound expression {err.status_code} == 404
+        rewrite @notfound /404.html
+        file_server
+    }
+}
+
+# www -> без www
+www.example.com {
+    redir https://example.com{uri} permanent
+}
+
+# Фотоархив Immich: по туннелю к шлюзу дома, запасной путь - Tailscale
+photos.example.com {
+    import security
+    reverse_proxy 10.78.0.6:2283 ПОДСТАВЬ_TS_ШЛЮЗА:2283 {
+        lb_policy first
+        lb_try_duration 5s
+        fail_duration 30s
+        transport http {
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+}

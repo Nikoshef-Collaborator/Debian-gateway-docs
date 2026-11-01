@@ -1,0 +1,11 @@
+#!/usr/sbin/nft -f
+# Заворот DNS клиентов LAN (порт 53) на локальный dnsmasq. Пересоздаёт только свою таблицу.
+add table ip gw_dnsredirect
+delete table ip gw_dnsredirect
+table ip gw_dnsredirect {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "lan" udp dport 53 redirect to :53
+        iifname "lan" tcp dport 53 redirect to :53
+    }
+}

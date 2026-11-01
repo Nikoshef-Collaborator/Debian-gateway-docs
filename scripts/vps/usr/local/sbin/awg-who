@@ -1,0 +1,3 @@
+#!/bin/bash
+# awg-who - имя, адрес, откуда и когда было рукопожатие у каждого пира awg1
+awk -v now=$(date +%s) 'NR==FNR{ if($0~/^# /) n=substr($0,3); if($1=="PublicKey") m[$3]=n; next } FNR>1{ hs=($5==0)?"не подключался":int((now-$5)/60)" мин назад"; printf "%-16s %-26s %-24s %s\n", m[$1], $4, $3, hs }' /etc/amnezia/amneziawg/awg1.conf <(awg show awg1 dump)

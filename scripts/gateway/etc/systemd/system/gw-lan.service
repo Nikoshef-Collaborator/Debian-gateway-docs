@@ -1,0 +1,12 @@
+[Unit]
+Description=Static IP on LAN interface (gateway)
+After=network-pre.target
+Before=dnsmasq.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gw-lan.sh
+
+[Install]
+WantedBy=multi-user.target

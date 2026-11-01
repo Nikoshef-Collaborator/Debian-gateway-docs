@@ -1,0 +1,12 @@
+[Unit]
+Description=Select healthy WARP config at boot
+After=multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/local/sbin/warp-pick.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly VPS config backup (Sun 05:30)
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

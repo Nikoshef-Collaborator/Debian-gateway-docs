@@ -1,0 +1,119 @@
+listenAddressSingleHTTPFrontend: ПОДСТАВЬ_TAILSCALE_IP:1337
+actions:
+  - title: "Отчёт о состоянии"
+    icon: "📊"
+    shell: /usr/local/sbin/bootcheck.sh >/dev/null; tail -45 /var/log/bootcheck.log
+    onclick: execution-dialog
+    timeout: 60
+  - title: "Слоты: статус"
+    icon: "🛡"
+    shell: /usr/local/sbin/gw-slot-status.sh
+    onclick: execution-dialog
+  - title: "Оркестратор: последние события"
+    icon: "logs"
+    shell: journalctl -t gw-orchestrator -n 50 --no-pager
+    onclick: execution-dialog
+  - title: "Перенос домена/группы в полосу"
+    icon: "🔀"
+    exec:
+      - /usr/local/sbin/gw-domain-move.sh
+      - "{{ target }}"
+      - "{{ lane }}"
+    onclick: execution-dialog
+    arguments:
+      - name: target
+        title: "Домен или группа (youtube...)"
+        type: "regex:^[a-zA-Z0-9_.-]+$"
+      - name: lane
+        title: "Полоса"
+        choices:
+          - value: warp
+          - value: direct
+          - value: amz
+  - title: "Ручные назначения (lane-state)"
+    icon: "logs"
+    shell: cat /etc/gateway/lane-state.conf
+    onclick: execution-dialog
+  - title: "Добавить конфиг в пул"
+    icon: "📥"
+    exec:
+      - /usr/local/sbin/gw-pool-add.sh
+      - "{{ cfgname }}"
+      - "{{ cfgbody }}"
+    onclick: execution-dialog
+    arguments:
+      - name: cfgname
+        title: "Имя файла (.conf добавится сам)"
+        type: "regex:^[A-Za-z0-9._-]+$"
+      - name: cfgbody
+        title: "Текст конфига WG/AmneziaWG"
+        type: raw_string_multiline
+  - title: "Тест конфига из пула"
+    icon: "🧪"
+    shell: /usr/local/sbin/gw-warp-test.sh {{ poolfile }}
+    onclick: execution-dialog
+    timeout: 40
+    arguments:
+      - name: poolfile
+        entity: poolfile
+        title: "Файл в пуле"
+        choices:
+          - value: '{{ poolfile.name }}'
+            title: '{{ poolfile.name }}'
+  - title: "Поставить конфиг в слот"
+    icon: "restart"
+    shell: /usr/local/sbin/gw-warp-activate.sh {{ poolfile }} {{ slot }}
+    onclick: execution-dialog
+    timeout: 20
+    arguments:
+      - name: poolfile
+        entity: poolfile
+        title: "Файл в пуле"
+        choices:
+          - value: '{{ poolfile.name }}'
+            title: '{{ poolfile.name }}'
+      - name: slot
+        title: "Слот"
+        choices:
+          - value: vpn-main
+          - value: vpn-backup
+          - value: vpn-amz
+      - type: confirmation
+        title: "Заменит конфиг слота, старый уйдёт в .bak. Уверен?"
+  - title: "Выбрать лучший WARP из пула"
+    icon: "🎲"
+    shell: /usr/local/sbin/warp-pick.sh --force
+    onclick: execution-dialog
+    timeout: 300
+  - title: "Удалить конфиг из пула"
+    icon: "🗑"
+    shell: /usr/local/sbin/gw-pool-delete.sh {{ poolfile }}
+    onclick: execution-dialog
+    arguments:
+      - name: poolfile
+        entity: poolfile
+        title: "Файл в пуле"
+        choices:
+          - value: '{{ poolfile.name }}'
+            title: '{{ poolfile.name }}'
+      - type: confirmation
+        title: "Удалит файл из пула безвозвратно. Уверен?"
+  - title: "Обновить список пула"
+    icon: "🔄"
+    shell: /usr/local/sbin/gw-pool-refresh-entities.sh
+    onclick: execution-dialog
+  - title: "Обновить списки РФ"
+    icon: "🇷🇺"
+    shell: systemctl start gw-feeder && journalctl -t gw-feeder -n 10 --no-pager
+    onclick: execution-dialog
+    timeout: 180
+  - title: "Перезагрузка шлюза"
+    icon: "restart"
+    shell: systemctl reboot
+    onclick: execution-dialog
+    arguments:
+      - type: confirmation
+        title: "Весь дом останется без интернета на минуту-две. Уверен?"
+entities:
+  - file: /etc/OliveTin/entities/poolfiles.json
+    name: poolfile

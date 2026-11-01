@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore inverse routing
+After=network-online.target vpn-slot@vpn-main.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gw-routing-restore.sh
+
+[Install]
+WantedBy=multi-user.target

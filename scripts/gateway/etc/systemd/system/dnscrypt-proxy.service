@@ -1,0 +1,15 @@
+[Unit]
+Description=dnscrypt-proxy (encrypted DNS stub for dnsmasq)
+After=network-online.target
+Wants=network-online.target
+Before=dnsmasq.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dnscrypt-proxy -config /etc/dnscrypt-proxy/dnscrypt-proxy.toml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

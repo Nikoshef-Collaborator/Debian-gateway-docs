@@ -1,0 +1,12 @@
+[Unit]
+Description=gw-nat: masquerade LAN via WAN
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gw-nat.sh
+ExecStop=/usr/sbin/nft delete table ip gw_nat
+
+[Install]
+WantedBy=multi-user.target

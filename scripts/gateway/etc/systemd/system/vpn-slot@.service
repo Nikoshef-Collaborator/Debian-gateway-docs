@@ -1,0 +1,17 @@
+[Unit]
+Description=AmneziaWG kernel VPN slot %i (awg-quick)
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/awg-quick up /etc/gateway/tunnels/%i.conf
+ExecStartPost=/usr/local/sbin/vpn-slot-up.sh %i
+ExecStop=/usr/bin/awg-quick down /etc/gateway/tunnels/%i.conf
+# упал при старте -> повторить через 30 с (иначе слот лежит до ручного запуска)
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

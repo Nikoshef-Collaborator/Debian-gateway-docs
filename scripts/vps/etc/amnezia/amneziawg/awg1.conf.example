@@ -1,0 +1,20 @@
+[Interface]
+PrivateKey = ПОДСТАВЬ_СОДЕРЖИМОЕ_server.key
+Address = 10.78.0.1/24
+ListenPort = 51820
+# --- маскировка (обязаны совпадать у сервера и клиентов: S1-S4, H1-H4, HeaderProtectionKey) ---
+Jc = 4
+Jmin = 20
+Jmax = 60
+S1 = 33
+S2 = 71
+S3 = 23
+S4 = 16
+H1 = 1
+H2 = 2
+H3 = 3
+H4 = 4
+# --- политика "Чебурнет"/"Дом": метка 0x300 -> таблица 300 -> к пиру шлюза ---
+PostUp = ip rule add fwmark 0x300 lookup 300 priority 5300
+PostUp = ip route replace default dev %i table 300
+PostDown = ip rule del fwmark 0x300 lookup 300 priority 5300

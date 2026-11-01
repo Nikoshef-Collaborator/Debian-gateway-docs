@@ -1,0 +1,7 @@
+[Unit]
+Description=gw-orchestrator: cascade failover watchdog for routing lanes
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gw-orchestrator.sh

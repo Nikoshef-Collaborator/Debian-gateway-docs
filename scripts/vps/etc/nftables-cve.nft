@@ -1,0 +1,6 @@
+table ip cve_2026_98432 {
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+        meta l4proto tcp ip hdrlength != 5 drop
+    }
+}

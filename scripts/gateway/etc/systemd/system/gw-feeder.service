@@ -1,0 +1,7 @@
+[Unit]
+Description=Update RU community lists (inverse mode)
+After=network-online.target dnsmasq.service gw-routing.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gw-feeder.sh

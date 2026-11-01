@@ -1,0 +1,13 @@
+[Unit]
+Description=gw-fw host input firewall (gateway-aware)
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/gw-fw.nft
+ExecStop=/usr/sbin/nft delete table inet gw_fw
+
+[Install]
+WantedBy=multi-user.target

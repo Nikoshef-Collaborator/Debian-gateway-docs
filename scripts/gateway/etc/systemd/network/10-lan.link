@@ -1,0 +1,5 @@
+[Match]
+MACAddress=ПОДСТАВЬ_MAC_LAN
+
+[Link]
+Name=lan

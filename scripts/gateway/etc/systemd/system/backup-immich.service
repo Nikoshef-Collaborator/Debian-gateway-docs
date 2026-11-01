@@ -1,0 +1,9 @@
+[Unit]
+Description=Immich backup (DB + media snapshots)
+After=docker.service local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/backup-immich.sh
+Nice=19
+IOSchedulingClass=idle

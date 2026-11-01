@@ -1,0 +1,10 @@
+[Unit]
+Description=Fill ru4 set at boot and daily
+
+[Timer]
+OnBootSec=1min
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target

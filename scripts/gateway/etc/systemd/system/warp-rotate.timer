@@ -1,0 +1,10 @@
+[Unit]
+Description=WARP rotation every 5-7h
+
+[Timer]
+OnActiveSec=5h
+OnUnitActiveSec=5h
+RandomizedDelaySec=2h
+
+[Install]
+WantedBy=timers.target

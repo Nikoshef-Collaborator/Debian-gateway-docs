@@ -1,0 +1,6 @@
+[Unit]
+Description=WARP pool rotation (warp-pick)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/warp-pick.sh --force

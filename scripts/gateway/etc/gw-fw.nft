@@ -1,0 +1,33 @@
+#!/usr/sbin/nft -f
+# gw-fw: firewall входа в шлюз + forward. Хозяин: gw-fw.service.
+# Пересоздаёт только свою таблицу - чужие (Docker, Tailscale, gwroute) не трогает.
+table inet gw_fw
+delete table inet gw_fw
+table inet gw_fw {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+        # LAN: администрирование (SSH), DNS, DHCP
+        iifname "lan" accept
+        # Tailscale: удалённый доступ
+        iifname "tailscale0" accept
+        # WAN: прямые соединения Tailscale
+        iifname "wan" udp dport 41641 accept
+        # WAN: продление DHCP от PON-терминала
+        iifname "wan" udp sport 67 udp dport 68 accept
+        # ICMP: ping, Path MTU Discovery
+        meta l4proto { icmp, ipv6-icmp } accept
+        # всё остальное на WAN, в том числе SSH 22 - policy drop
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        # MSS clamp: без него часть сайтов виснет через туннели (MTU)
+        tcp flags syn tcp option maxseg size set rt mtu
+        # DoT (порт 853) клиентов запрещён: иначе их DNS идёт мимо dnsmasq
+        # и полосы не работают. Android с "Частным DNS" откатится на DNS шлюза.
+        iifname "lan" tcp dport 853 reject with tcp reset
+        iifname "lan" udp dport 853 reject
+    }
+}

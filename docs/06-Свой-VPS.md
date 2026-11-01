@@ -1,0 +1,1075 @@
+# ЧАСТЬ 6 - Свой VPS: сервер AmneziaWG, туннели шлюза, профили "Чебурнет" и "Дом"
+
+> **Зачем свой VPS.**
+> 1. **Запасной выход** шлюза (`vpn-backup`), если WARP лёг.
+> 2. **Чистый выход для ИИ-сервисов** (`vpn-amz`, полоса 0x200): OpenAI и
+>    Anthropic отвечают 403 на адреса Cloudflare.
+> 3. **Личный VPN** для телефона и ПК вне дома.
+> 4. **"Чебурнет" и "Дом"** - из-за границы заходить на российские сервисы
+>    (Госуслуги, банки, доски объявлений) с **домашнего** российского IP:
+>    телефон -> VPS -> шлюз дома -> интернет.
+>
+> **Правила для ИИ - в Части 0.** Здесь особенно: всегда называй машину
+> (**VPS** / **шлюз** / **ПК**). Приватные ключи, `PresharedKey`,
+> `HeaderProtectionKey` и клиентские `.conf` - никогда в чат.
+>
+> ⚠️ **Статус раздела.** Схема и ключевые правила сняты с работающей системы
+> (октябрь 2026). Полные файлы рабочего сервера в эту редакцию не снимались,
+> поэтому скрипты добавления пира и обновления списка РФ здесь написаны по
+> этой схеме заново. На новом сервере проходи каждую проверку. На уже
+> работающем - сверяй со своими файлами, а не заменяй их.
+
+---
+
+## Схема
+
+```
+ Телефон/ПК (за границей)
+     │  AmneziaWG, профиль "Чебурнет" или "Дом"
+     ▼
+   VPS  (Нидерланды и т.п.)  awg1, подсеть 10.78.0.0/24, VPS = 10.78.0.1
+     │  метка 0x300 -> таблица 300 -> обратно в awg1, к пиру шлюза
+     ▼
+ ШЛЮЗ дома (vpn-backup = пир 10.78.0.6)
+     │  NAT: 10.78.0.0/24 -> wan
+     ▼
+ интернет с ДОМАШНЕГО IP
+```
+
+| Профиль | Что уходит домой | Что идёт через VPS |
+|---|---|---|
+| обычный VPN | ничего | всё, **кроме** российских адресов (им отказ - чтобы РФ-сервисы не видели IP VPS) |
+| Чебурнет | российские адреса | остальное |
+| Дом | всё | ничего |
+
+Пример плана адресов (у каждого устройства и профиля - **свой ключ и свой
+адрес**):
+
+| Адрес | Пир |
+|---|---|
+| 10.78.0.1 | сам VPS |
+| 10.78.0.2-.3 | ПК, телефон (обычный VPN) |
+| 10.78.0.4-.7 | шлюзы: `vpn-backup` и `vpn-amz` каждого |
+| 10.78.0.8-.9 | ПК, телефон - "Чебурнет" |
+| 10.78.0.10-.11 | телефон, ПК - "Дом" |
+
+---
+
+## Шаг 6.1 - VPS и базовая защита
+
+Требования: 1 vCPU, 1-2 ГБ ОЗУ, Ubuntu LTS. Проверь до покупки на тестовом
+периоде: доступен ли сервер из дома (SSH), не в блок-листах ли адрес.
+
+> На тестовом сервере реальная ОС оказалась не той, что обещал тариф.
+> Смотри сам: `cat /etc/os-release`.
+
+**На VPS** (через консоль хостера или SSH):
+
+```
+apt update && apt full-upgrade -y
+```
+
+SSH только по ключу - сначала положи свой ключ (как в Части 2, Шаг 2.16, но
+пользователь `root` или свой), **проверь вход по ключу в новом окне**, потом:
+
+```
+tee /etc/ssh/sshd_config.d/hardening.conf > /dev/null <<'EOF'
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+X11Forwarding no
+EOF
+```
+
+```
+systemctl restart ssh
+```
+
+> Пароль root от хостера в чат не присылай. После переустановки ОС из панели
+> хостера пароль сбрасывается - меняй сразу.
+
+---
+
+## Шаг 6.2 - AmneziaWG на VPS (Ubuntu)
+
+По [официальной инструкции](https://docs.amnezia.org/documentation/instructions/install-amneziawg-kernel-module-linux),
+**на VPS**:
+
+```
+apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)
+```
+
+```
+add-apt-repository -y ppa:amnezia/ppa
+```
+
+```
+apt install -y amneziawg qrencode
+```
+
+```
+modinfo amneziawg | grep -E '^(filename|version)'
+```
+
+**ОЖИДАЕТСЯ:** путь и версия модуля.
+
+**ЕСЛИ `Module amneziawg not found`** -> DKMS не собрал модуль под ядро. На
+очень новых ядрах это бывает - ищи решение в issues репозитория
+`amnezia-vpn/amneziawg-linux-kernel-module`. Не выдумывай патчи.
+
+Пересылка пакетов:
+
+```
+tee /etc/sysctl.d/99-awg.conf > /dev/null <<'EOF'
+net.ipv4.ip_forward=1
+EOF
+```
+
+```
+sysctl --system
+```
+
+---
+
+## Шаг 6.3 - Ключи и конфиг сервера `awg1`
+
+Имя внешнего интерфейса VPS:
+
+```
+ip -br route get 1.1.1.1
+```
+
+**ОЖИДАЕТСЯ:** после `dev` имя, например `eth0`. Дальше в тексте `eth0` - если
+у тебя иначе, подставь своё.
+
+Ключи сервера:
+
+```
+umask 077 && mkdir -p /etc/amnezia/amneziawg && cd /etc/amnezia/amneziawg && awg genkey | tee server.key | awg pubkey > server.pub
+```
+
+Конфиг. Порт - любой свободный UDP (пример `51820`). ⛔ Заполни через
+`nano`: `PrivateKey` - содержимое `server.key`.
+
+```
+tee /etc/amnezia/amneziawg/awg1.conf > /dev/null <<'EOF'
+[Interface]
+PrivateKey = ПОДСТАВЬ_СОДЕРЖИМОЕ_server.key
+Address = 10.78.0.1/24
+ListenPort = 51820
+# --- маскировка (обязаны совпадать у сервера и клиентов: S1-S4, H1-H4, HeaderProtectionKey) ---
+Jc = 4
+Jmin = 20
+Jmax = 60
+S1 = 33
+S2 = 71
+S3 = 23
+S4 = 16
+H1 = 1
+H2 = 2
+H3 = 3
+H4 = 4
+# --- политика "Чебурнет"/"Дом": метка 0x300 -> таблица 300 -> к пиру шлюза ---
+PostUp = ip rule add fwmark 0x300 lookup 300 priority 5300
+PostUp = ip route replace default dev %i table 300
+PostDown = ip rule del fwmark 0x300 lookup 300 priority 5300
+EOF
+```
+
+```
+chmod 600 /etc/amnezia/amneziawg/awg1.conf
+```
+
+> **Параметры маскировки.** Значения выше - только пример. ⛔ **Придумай
+> свои** и не копируй чужие из интернета: одинаковые `Jc/S1-S4` у многих
+> серверов упрощают их распознавание. Правила - Части 5 ("Версии протокола"): `S1 + 56 != S2`, диапазоны
+> `H1-H4` не пересекаются и не заходят в `1-4` (кроме варианта ровно
+> `1/2/3/4`). Для протокола 3.x добавляются `HeaderProtectionKey`,
+> `ContentPaddingAddition`, случайные таймеры и др. - бери их из
+> документации своей версии AmneziaWG. Скрипт добавления пира (6.6) копирует
+> в клиентские конфиги все такие строки из `[Interface]` сервера, так что
+> они всегда совпадут.
+
+---
+
+## Шаг 6.4 - Firewall VPS (nftables)
+
+⚠️ **Главная грабля VPS.** Файл `/etc/nftables.conf` начинается с
+`flush ruleset`. При загрузке это нормально (Tailscale создаёт свои правила
+позже). Но **применение всего файла на живом сервере** (`nft -f
+/etc/nftables.conf` или `systemctl restart nftables`) **стирает правила
+Tailscale** - пропадает доступ по Tailscale. На работающем сервере правки
+вноси **двумя способами сразу**: живой командой `nft add/insert` и той же
+строкой в файл.
+
+**Первая настройка на новом сервере** (Tailscale ещё не стоит):
+
+```
+tee /etc/nftables.conf > /dev/null <<'EOF'
+#!/usr/sbin/nft -f
+flush ruleset
+
+table inet filter {
+    # российские подсети (наполняет ru-block-update.sh)
+    set ru4 { type ipv4_addr; flags interval; auto-merge; }
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+        meta l4proto icmp accept
+        udp dport 51820 accept          # AmneziaWG
+        udp dport 41641 accept          # Tailscale напрямую
+        iifname "awg1" accept           # из туннеля - всё (SSH по 10.78.0.1)
+        iifname "tailscale0" accept
+        tcp dport 22 accept             # ⛔ убрать после проверки SSH по туннелю
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        ct state established,related accept
+        # Чебурнет (.8/.9): российские адреса - домой через шлюз
+        iifname "awg1" oifname "awg1" ip saddr { 10.78.0.8, 10.78.0.9 } ip daddr @ru4 accept
+        # Дом (.10/.11): весь трафик домой
+        iifname "awg1" oifname "awg1" ip saddr { 10.78.0.10, 10.78.0.11 } accept
+        # Остальным клиентам туннеля российские адреса запрещены:
+        # РФ-приложения не должны видеть IP VPS
+        iifname "awg1" ip daddr @ru4 reject
+        # выход в интернет
+        iifname "awg1" oifname "eth0" accept
+    }
+
+    # Метка для профилей "Чебурнет" и "Дом" -> таблица 300 -> пир шлюза
+    chain ru_home {
+        type filter hook prerouting priority mangle; policy accept;
+        iifname "awg1" ip saddr { 10.78.0.8, 10.78.0.9 } ip daddr @ru4 meta mark set 0x300
+        iifname "awg1" ip saddr { 10.78.0.10, 10.78.0.11 } meta mark set 0x300
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+
+table ip nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "eth0" ip saddr 10.78.0.0/24 masquerade
+    }
+}
+EOF
+```
+
+```
+nft -c -f /etc/nftables.conf && echo "СИНТАКСИС OK"
+```
+
+⛔ **СТОП:** держи открытой текущую SSH-сессию. Применить:
+
+```
+systemctl enable --now nftables
+```
+
+```
+systemctl restart nftables
+```
+
+Проверь вход по SSH в **новом** окне. Не входит - консоль хостера,
+`nft flush ruleset`, ищи ошибку.
+
+> Строку `tcp dport 22 accept` убери, когда убедишься, что SSH работает по
+> туннелю (`ssh root@10.78.0.1` с подключённого клиента) или по Tailscale.
+> Публичный порт 22 сканируют постоянно. Запасной вход - консоль в панели
+> хостера.
+
+---
+
+## Шаг 6.5 - Список российских подсетей на VPS (`ru4`)
+
+```
+tee /usr/local/sbin/ru-block-update.sh > /dev/null <<'EOF'
+#!/bin/bash
+# ru-block-update.sh - наполнить набор inet filter ru4 российскими подсетями.
+# Набор очищается только после успешной загрузки списка.
+set -u
+URL="https://www.ipdeny.com/ipblocks/data/countries/ru.zone"
+tmp=$(mktemp); d=$(mktemp -d)
+curl -fsS --max-time 60 "$URL" -o "$tmp" || { logger -t ru-block "ERROR: не скачать"; exit 1; }
+n=$(grep -cE '^[0-9]+\.' "$tmp")
+[ "$n" -gt 1000 ] || { logger -t ru-block "ERROR: мало подсетей ($n), не применяю"; exit 1; }
+grep -E '^[0-9]+\.' "$tmp" | split -l 500 - "$d/c_"
+nft flush set inet filter ru4
+for f in "$d"/c_*; do nft add element inet filter ru4 "{ $(paste -sd, "$f") }"; done
+rm -rf "$tmp" "$d"
+logger -t ru-block "ru4: $n подсетей"
+EOF
+```
+
+```
+chmod 755 /usr/local/sbin/ru-block-update.sh
+```
+
+```
+/usr/local/sbin/ru-block-update.sh && journalctl -t ru-block -n 1 --no-pager
+```
+
+**ОЖИДАЕТСЯ:** `ru4: N подсетей` (тысячи).
+
+Обновление раз в сутки и после загрузки (после `flush ruleset` набор пуст):
+
+```
+tee /etc/systemd/system/ru-block-update.service > /dev/null <<'EOF'
+[Unit]
+Description=Fill ru4 set
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ru-block-update.sh
+EOF
+```
+
+```
+tee /etc/systemd/system/ru-block-update.timer > /dev/null <<'EOF'
+[Unit]
+Description=Fill ru4 set at boot and daily
+
+[Timer]
+OnBootSec=1min
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+```
+
+```
+systemctl daemon-reload && systemctl enable --now ru-block-update.timer
+```
+
+> Проверка "напрямую/домой" сайтом 2ip.ru не годится: он хостится вне РФ и в
+> `ru4` не попадает. Проверяй по `ip.mail.ru` (российский адрес).
+
+---
+
+## Шаг 6.6 - Пиры: скрипт добавления и `awg-who`
+
+Скрипт создаёт ключи клиента, **добавляет пир на живой интерфейс** (без
+перезапуска - остальные клиенты не рвутся), дописывает его в `awg1.conf` и
+кладёт клиентский конфиг в `/root/awg1-ИМЯ.conf`.
+
+```
+tee /usr/local/sbin/awg1-add-peer.sh > /dev/null <<'EOF'
+#!/bin/bash
+# awg1-add-peer.sh <имя> <адрес 10.78.0.N> <endpoint IP:порт VPS>
+set -eu
+NAME="$1"; ADDR="$2"; EP="$3"
+CONF=/etc/amnezia/amneziawg/awg1.conf
+OUT="/root/awg1-${NAME}.conf"
+grep -q "AllowedIPs = ${ADDR}/32" "$CONF" && { echo "адрес $ADDR уже занят"; exit 1; }
+umask 077
+PRIV=$(awg genkey); PUB=$(echo "$PRIV" | awg pubkey); PSK=$(awg genpsk)
+# 1. на живой интерфейс
+awg set awg1 peer "$PUB" preshared-key <(echo "$PSK") allowed-ips "${ADDR}/32"
+# 2. в конфиг сервера (строка "# имя" перед пиром нужна awg-who)
+cat >> "$CONF" <<P
+
+# ${NAME}
+[Peer]
+PublicKey = ${PUB}
+PresharedKey = ${PSK}
+AllowedIPs = ${ADDR}/32
+P
+# 3. клиентский конфиг: маскировка копируется из [Interface] сервера
+{
+  echo "[Interface]"
+  echo "PrivateKey = ${PRIV}"
+  echo "Address = ${ADDR}/32"
+  echo "DNS = 1.1.1.1"
+  echo "MTU = 1376"
+  sed -n '/^\[Interface\]/,/^\[Peer\]/p' "$CONF" | grep -E '^[[:space:]]*(Jc|Jmin|Jmax|S[1-4]|H[1-4]|I[1-5]|HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts|RandomTrailers|DisableCookies)[[:space:]]*='
+  echo
+  echo "[Peer]"
+  echo "PublicKey = $(awg show awg1 public-key)"
+  echo "PresharedKey = ${PSK}"
+  echo "AllowedIPs = 0.0.0.0/0"
+  echo "Endpoint = ${EP}"
+  echo "PersistentKeepalive = 25"
+} > "$OUT"
+chmod 600 "$OUT"
+echo "Пир ${NAME} (${ADDR}) добавлен. Клиентский конфиг: ${OUT}"
+echo "После импорта на устройство - УДАЛИ этот файл."
+EOF
+```
+
+```
+chmod 700 /usr/local/sbin/awg1-add-peer.sh
+```
+
+Кто есть кто и когда подключался:
+
+```
+tee /usr/local/sbin/awg-who > /dev/null <<'EOF'
+#!/bin/bash
+# awg-who - имя, адрес, откуда и когда было рукопожатие у каждого пира awg1
+awk -v now=$(date +%s) 'NR==FNR{ if($0~/^# /) n=substr($0,3); if($1=="PublicKey") m[$3]=n; next } FNR>1{ hs=($5==0)?"не подключался":int((now-$5)/60)" мин назад"; printf "%-16s %-26s %-24s %s\n", m[$1], $4, $3, hs }' /etc/amnezia/amneziawg/awg1.conf <(awg show awg1 dump)
+EOF
+```
+
+```
+chmod 755 /usr/local/sbin/awg-who
+```
+
+Запуск сервера:
+
+```
+systemctl enable --now awg-quick@awg1
+```
+
+```
+awg show awg1 | head -5
+```
+
+**ОЖИДАЕТСЯ:** `interface: awg1`, `listening port: 51820`.
+
+> Свой ПК/телефон и шлюзы - отдельные пиры. **Один ключ - одно устройство и
+> один профиль.** Тариф хостинга может ограничивать число устройств - удаляй
+> неиспользуемых пиров (`awg set awg1 peer КЛЮЧ remove` + удалить блок из
+> `awg1.conf`).
+
+---
+
+## Шаг 6.7 - Пиры для шлюза (`vpn-backup` и `vpn-amz`)
+
+**На VPS** (⛔ подставь внешний IP VPS):
+
+```
+/usr/local/sbin/awg1-add-peer.sh gw-backup 10.78.0.6 ПОДСТАВЬ_IP_VPS:51820
+```
+
+```
+/usr/local/sbin/awg1-add-peer.sh gw-amz 10.78.0.7 ПОДСТАВЬ_IP_VPS:51820
+```
+
+Пиру `vpn-backup` нужен ещё и путь "домой" для Чебурнета/Дома: этому пиру
+разрешаем `0.0.0.0/0`. В `awg1.conf` это делать **нельзя** (awg-quick
+навесил бы маршрут на весь интернет), поэтому - строкой `PostUp`. ⛔ Ключ -
+`PublicKey` пира `gw-backup` из `awg1.conf`:
+
+```
+grep -A2 '^# gw-backup' /etc/amnezia/amneziawg/awg1.conf
+```
+
+Открой `nano /etc/amnezia/amneziawg/awg1.conf` и после строк `PostUp` добавь
+(ключ подставь):
+
+```
+PostUp = awg set %i peer ПОДСТАВЬ_PUBLICKEY_gw-backup allowed-ips 10.78.0.6/32,0.0.0.0/0
+```
+
+Применить на живом интерфейсе той же командой (с `awg1` вместо `%i`):
+
+```
+awg set awg1 peer ПОДСТАВЬ_PUBLICKEY_gw-backup allowed-ips 10.78.0.6/32,0.0.0.0/0
+```
+
+**Перенести конфиги на шлюз** (на **ПК**, PowerShell; адрес VPS - по Tailscale
+или публичный, как настроен SSH):
+
+```
+scp root@АДРЕС_VPS:/root/awg1-gw-backup.conf $HOME\Downloads\vpn-backup.conf
+```
+
+```
+scp root@АДРЕС_VPS:/root/awg1-gw-amz.conf $HOME\Downloads\vpn-amz.conf
+```
+
+```
+scp $HOME\Downloads\vpn-backup.conf $HOME\Downloads\vpn-amz.conf user@АДРЕС_ШЛЮЗА:/tmp/
+```
+
+**На шлюзе:**
+
+```
+sudo mv /tmp/vpn-backup.conf /tmp/vpn-amz.conf /etc/gateway/tunnels/
+```
+
+```
+sudo nano /etc/gateway/tunnels/vpn-backup.conf
+```
+
+В `[Interface]` добавь `Table = off`, удали строку `DNS`. Сохрани.
+
+```
+sudo nano /etc/gateway/tunnels/vpn-amz.conf
+```
+
+В `[Interface]` добавь `Table = 200`, удали строку `DNS`. Сохрани.
+
+Дальше - Часть 2, Шаг 2.13 (проверки и запуск слотов).
+
+**Убрать временные копии ключей:**
+- на ПК: `Remove-Item $HOME\Downloads\vpn-backup.conf, $HOME\Downloads\vpn-amz.conf`
+- на VPS: `rm /root/awg1-gw-backup.conf /root/awg1-gw-amz.conf`
+
+**ПРОВЕРКА на VPS:**
+
+```
+awg-who
+```
+
+**ОЖИДАЕТСЯ:** `gw-backup` и `gw-amz` с рукопожатием "N мин назад".
+
+---
+
+## Шаг 6.8 - Личные профили: VPN, Чебурнет, Дом
+
+**На VPS**, по пиру на устройство и профиль (⛔ IP VPS подставь):
+
+```
+/usr/local/sbin/awg1-add-peer.sh phone-vpn 10.78.0.3 ПОДСТАВЬ_IP_VPS:51820
+```
+
+```
+/usr/local/sbin/awg1-add-peer.sh phone-cheburnet 10.78.0.9 ПОДСТАВЬ_IP_VPS:51820
+```
+
+```
+/usr/local/sbin/awg1-add-peer.sh phone-dom 10.78.0.10 ПОДСТАВЬ_IP_VPS:51820
+```
+
+Адреса `.8-.11` должны совпадать с правилами `forward` и `ru_home` (Шаг 6.4).
+Взял другие - поправь правила.
+
+**Импорт на телефон** - QR-код прямо в терминале VPS:
+
+```
+qrencode -t ansiutf8 < /root/awg1-phone-dom.conf
+```
+
+В приложении AmneziaVPN: "Добавить" -> "QR-код", назови профиль понятно
+("Дом"). Повтори для каждого профиля.
+
+**На ПК** - файл через `scp` (как в 6.7), импорт в AmneziaVPN, затем удалить
+файл из Downloads.
+
+**Удалить клиентские конфиги с VPS** после импорта:
+
+```
+rm /root/awg1-phone-*.conf
+```
+
+> В этих файлах приватный ключ. Кто получит файл - подключится как ты, а с
+> профилем "Дом" будет выходить в интернет с твоего домашнего IP. Нужна
+> копия - менеджер паролей, не Downloads и не `/root`.
+
+### Проверка профилей (на телефоне, в браузере)
+
+| Профиль | `ip.mail.ru` | `ifconfig.me` |
+|---|---|---|
+| VPN | не откроется (российский адрес запрещён) | IP VPS |
+| Чебурнет | **домашний IP** | IP VPS |
+| Дом | **домашний IP** | **домашний IP** |
+
+**На VPS** - какой профиль реально подключён:
+
+```
+awg-who
+```
+
+**ЕСЛИ результат не тот** -> почти всегда на устройстве включён не тот
+профиль или импортирован старый конфиг. `awg-who` покажет, у какого пира
+свежее рукопожатие.
+
+Счётчики правил (растут = трафик идёт домой):
+
+```
+nft list chain inet filter ru_home
+```
+
+---
+
+## Шаг 6.9 - Tailscale на VPS (запасной SSH)
+
+```
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+```
+tailscale up
+```
+
+Теперь SSH к VPS есть и по Tailscale, и по туннелю (`10.78.0.1`), даже если
+один из них сломан.
+
+⚠️ После этого **никогда** не применяй `/etc/nftables.conf` целиком на живом
+сервере (Шаг 6.4).
+
+---
+
+## Шаг 6.10 - Устойчивость VPS: обновления, ядро, бэкап, подкачка
+
+### 6.10.1 - Автообновления безопасности (ядро - отдельно)
+
+⚠️ **Реальный случай:** в образе хостера таймеры автообновлений были
+**замаскированы** - за две недели не поставилось ни одного исправления
+безопасности (OpenSSH, systemd, curl, zlib...). Проверь (на **VPS**):
+
+```
+systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer
+```
+
+`masked` или `disabled` - обновления не идут.
+
+⛔ **Сначала закрепи ядро.** Модуль AmneziaWG собирается под конкретное ядро
+(DKMS). Если автообновление поставит новое ядро без заголовков, после
+перезагрузки модуля не будет - VPN ляжет у всех. Ядро обновляем вручную
+(6.10.2).
+
+Какой метапакет ядра стоит:
+
+```
+dpkg -l 'linux-image-*' 'linux-generic*' | awk '/^ii/{print $2}' | grep -vE '[0-9]'
+```
+
+**ОЖИДАЕТСЯ:** `linux-image-virtual` или `linux-image-generic`. ⛔ Подставь своё:
+
+```
+apt-mark hold linux-image-virtual
+```
+
+```
+apt-mark showhold
+```
+
+Остальные обновления - вручную один раз:
+
+```
+apt update
+```
+
+```
+apt upgrade -y 2>&1 | tee /root/upgrade.log
+```
+
+```
+systemctl --failed --no-legend
+```
+
+Включить автообновления:
+
+```
+systemctl unmask apt-daily.timer apt-daily-upgrade.timer
+```
+
+```
+systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
+```
+
+Пробный прогон (ничего не ставит):
+
+```
+unattended-upgrade --dry-run --debug 2>&1 | tail -15
+```
+
+**ОЖИДАЕТСЯ:** для ядра строка `adjusting candidate to version ...` с
+**текущей** версией - закреплённое ядро не трогается. Сторонние репозитории
+(Tailscale, Caddy, Amnezia) по умолчанию тоже не обновляются автоматически -
+их обновляй руками раз в месяц.
+
+> Если `ls /var/run/reboot-required` показывает файл - нужна перезагрузка.
+> Делай её ночью (6.10.2, последний блок): VPN у всех пропадёт на минуту.
+
+### 6.10.2 - Обновление ядра вручную (с проверкой модуля ДО перезагрузки)
+
+Раз в 1-2 месяца или когда в `apt list --upgradable` появилось новое ядро.
+⛔ Подставь номер нового ядра из этого списка (пример - `7.0.0-42`):
+
+```
+apt-mark unhold linux-image-virtual
+```
+
+```
+apt install -y linux-image-virtual linux-headers-7.0.0-42-generic 2>&1 | tee /root/kernel.log
+```
+
+Главная проверка - модуль собран под новое ядро:
+
+```
+dkms status
+```
+
+```
+modinfo -k 7.0.0-42-generic amneziawg | grep -E '^(filename|version)'
+```
+
+**ОЖИДАЕТСЯ:** `amneziawg/... 7.0.0-42-generic ... installed` и путь в
+`/lib/modules/7.0.0-42-generic/`.
+
+⛔ **ЕСЛИ модуля под новое ядро нет - НЕ перезагружайся.** Пришли помощнику
+`tail -40 /root/kernel.log`. Старое ядро остаётся основным, пока VPS не
+перезагрузится.
+
+Если собрался - снова закрепить и перезагрузить ночью по таймеру (время
+VPS обычно в UTC: 04:00 МСК = 01:00 UTC, ⛔ дату подставь):
+
+```
+apt-mark hold linux-image-virtual
+```
+
+```
+systemd-run --on-calendar="2026-10-29 01:00:00 UTC" /bin/systemctl reboot
+```
+
+Утром:
+
+```
+uname -r; systemctl --failed --no-legend; systemctl is-active awg-quick@awg1 caddy tailscaled
+```
+
+> Старое ядро и его модуль остаются в системе. Если с новым что-то не так -
+> в консоли хостера при загрузке выбрать предыдущее ядро.
+
+### 6.10.3 - Бэкап VPS на шлюз (раз в неделю, автоматически)
+
+⚠️ Хостер может заменить сломанный сервер новым - **с другим IP и пустым
+диском**, переустановка ОС тоже стирает всё. Без копии ключа сервера
+AmneziaWG придётся перевыпускать конфиги всем: телефонам, ПК, шлюзам.
+Копии **на самом VPS** не спасают.
+
+Схема: шлюз забирает архив по отдельному ключу. На VPS этот ключ умеет
+**только одно** - отдать архив (`restrict,command=`), без консоли, и только с
+адресов шлюза.
+
+**На шлюзе** - ключ:
+
+```
+sudo ssh-keygen -t ed25519 -f /root/.ssh/vps_backup -N "" -C "gw-vps-backup"
+```
+
+```
+sudo cat /root/.ssh/vps_backup.pub
+```
+
+Скопируй строку (публичный ключ, не секрет).
+
+**На VPS** - скрипт выдачи архива:
+
+```
+cat > /usr/local/sbin/vps-backup-dump.sh <<'EOF'
+#!/bin/bash
+# vps-backup-dump.sh - выдаёт в stdout tar.gz с конфигурацией VPS.
+# Вызывается ТОЛЬКО через ключ бэкапа (command= в authorized_keys).
+# Внутри есть приватные ключи AmneziaWG - архив хранить с правами 600.
+set -u
+cd /
+LIST=""
+for p in etc/amnezia etc/nftables.conf etc/caddy var/www usr/local/sbin \
+         etc/systemd/system etc/sysctl.d etc/ssh/sshd_config.d \
+         etc/systemd/journald.conf.d etc/apt/apt.conf.d opt/AdGuardHome \
+         root/.ssh/authorized_keys etc/hostname etc/netplan; do
+    [ -e "$p" ] && LIST="$LIST $p"
+done
+# shellcheck disable=SC2086
+tar czf - --exclude='opt/AdGuardHome/data/querylog*' --exclude='opt/AdGuardHome/data/stats.db' $LIST 2>/dev/null
+EOF
+```
+
+```
+chmod 700 /usr/local/sbin/vps-backup-dump.sh
+```
+
+Разрешить ключ только для этого скрипта - **в два приёма**, чтобы длинная
+строка не обрезалась при вставке. ⛔ В `from=` - адреса шлюза в туннеле и его
+Tailscale-адрес:
+
+```
+printf 'restrict,command="/usr/local/sbin/vps-backup-dump.sh",from="10.78.0.6,10.78.0.7,ПОДСТАВЬ_TS_ШЛЮЗА" ' >> /root/.ssh/authorized_keys
+```
+
+⛔ Вместо `ВСТАВЬ_КЛЮЧ` - строка с ключом целиком, начиная с `ssh-ed25519`:
+
+```
+echo 'ВСТАВЬ_КЛЮЧ' >> /root/.ssh/authorized_keys
+```
+
+```
+tail -1 /root/.ssh/authorized_keys | awk '{print $1; print $2}' | cut -c1-60
+```
+
+**ОЖИДАЕТСЯ:** `restrict,command=...` и `ssh-ed25519`. Иначе удали строку
+(`sed -i '$d' /root/.ssh/authorized_keys`) и повтори.
+
+**На шлюзе** - принять ключ хоста VPS по обоим адресам (⛔ подставь
+Tailscale-адрес VPS):
+
+```
+sudo ssh -i /root/.ssh/vps_backup -o StrictHostKeyChecking=accept-new root@10.78.0.1 > /dev/null; echo "код: $?"
+```
+
+```
+sudo ssh -i /root/.ssh/vps_backup -o StrictHostKeyChecking=accept-new root@ПОДСТАВЬ_TS_VPS > /dev/null; echo "код: $?"
+```
+
+**ОЖИДАЕТСЯ:** `PTY allocation request failed` и `код: 0` - консоль ключу
+недоступна (так и задумано), архив отдан.
+
+**На шлюзе** - скрипт, который забирает архив (⛔ в `HOSTS` подставь
+Tailscale-адрес VPS):
+
+```
+sudo tee /usr/local/sbin/vps-backup-pull.sh > /dev/null <<'EOF'
+#!/bin/bash
+# vps-backup-pull.sh - забирает бэкап конфигурации VPS на шлюз.
+# Ключ /root/.ssh/vps_backup на VPS ограничен: умеет только отдать архив.
+# Сначала через туннель AmneziaWG, при неудаче - через Tailscale.
+set -u
+HOSTS="10.78.0.1 ПОДСТАВЬ_TS_VPS"
+KEY=/root/.ssh/vps_backup
+DIR=/var/backups/vps
+KEEP=8
+LOG=/var/log/vps-backup.log
+log(){ echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+tg(){ [ -x /usr/local/sbin/tg-notify.sh ] && /usr/local/sbin/tg-notify.sh "Бэкап VPS" "$1" "$2"; }
+mkdir -p "$DIR"; chmod 700 "$DIR"
+umask 077
+OUT="$DIR/vps-$(date +%F_%H%M).tar.gz"
+ok=0
+for h in $HOSTS; do
+    if ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=yes "root@$h" > "$OUT.part" 2>>"$LOG" \
+       && [ -s "$OUT.part" ] && gzip -t "$OUT.part" 2>/dev/null; then
+        ok=1; log "получен через $h"; break
+    fi
+    log "через $h не вышло"
+done
+if [ "$ok" -ne 1 ]; then
+    rm -f "$OUT.part"; log "ОШИБКА: бэкап VPS не получен"
+    tg "ОШИБКА: бэкап VPS не получен (лог $LOG)" warn; exit 1
+fi
+mv "$OUT.part" "$OUT"
+grep -q 'etc/amnezia/amneziawg/awg1.conf' <(tar tzf "$OUT") || { log "ОШИБКА: в архиве нет awg1.conf"; tg "ОШИБКА: в бэкапе VPS нет awg1.conf" warn; exit 1; }
+ls -1t "$DIR"/vps-*.tar.gz | tail -n +$((KEEP+1)) | xargs -r rm -f
+log "готово: $(basename "$OUT"), $(du -h "$OUT" | cut -f1), хранится $(ls -1 "$DIR"/vps-*.tar.gz | wc -l)"
+exit 0
+EOF
+```
+
+```
+sudo chmod 700 /usr/local/sbin/vps-backup-pull.sh
+```
+
+```
+sudo /usr/local/sbin/vps-backup-pull.sh
+```
+
+**ОЖИДАЕТСЯ:** `получен через 10.78.0.1` и `готово: vps-...tar.gz`.
+
+```
+sudo bash -c 'tar tzf $(ls -1t /var/backups/vps/vps-*.tar.gz | head -1) | grep -E "awg1.conf$|nftables.conf|Caddyfile"'
+```
+
+Расписание - воскресенье 05:30, хранится 8 последних (два месяца):
+
+```
+sudo tee /etc/systemd/system/vps-backup.service > /dev/null <<'EOF'
+[Unit]
+Description=Pull VPS config backup to gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vps-backup-pull.sh
+EOF
+```
+
+```
+sudo tee /etc/systemd/system/vps-backup.timer > /dev/null <<'EOF'
+[Unit]
+Description=Weekly VPS config backup (Sun 05:30)
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+```
+
+```
+sudo systemctl daemon-reload
+```
+
+```
+sudo systemctl enable --now vps-backup.timer
+```
+
+После серьёзной правки на VPS (новый пир, правила) - запусти
+`sudo /usr/local/sbin/vps-backup-pull.sh` сразу.
+
+**Восстановление на новый VPS:** поставь систему и пакеты (6.1, 6.2, Caddy,
+Tailscale), затем распакуй нужные файлы из архива **по одному**, сверяя имя
+сетевого интерфейса в `nftables.conf` (на новом сервере оно может быть
+другим). Ключ сервера в `awg1.conf` прежний - у клиентов меняется только
+адрес сервера (`Endpoint`). Если в `Endpoint` у клиентов стоит **имя**
+(например, `vpn.example.com`), хватит поменять A-запись в DNS.
+
+> Старые архивы, которые лежат на самом VPS (`/root/*backup*`), закрой:
+> `chmod 600 /root/*backup*.tar.gz` - внутри ключи.
+
+### 6.10.4 - Подкачка (страховка от нехватки памяти)
+
+На 1-2 ГБ ОЗУ - 1 ГБ подкачки, используется только в крайнем случае:
+
+```
+fallocate -l 1G /swapfile
+```
+
+```
+chmod 600 /swapfile
+```
+
+```
+mkswap /swapfile
+```
+
+```
+swapon /swapfile
+```
+
+```
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+```
+echo 'vm.swappiness=10' > /etc/sysctl.d/90-swap.conf
+```
+
+```
+sysctl -p /etc/sysctl.d/90-swap.conf
+```
+
+```
+swapon --show
+```
+
+### 6.10.5 - Полезно знать про хостинг (Amnezia Hosting)
+
+- **"Белые списки" на мобильном интернете:** при угрозе БПЛА операторы
+  оставляют доступ только к разрешённым сервисам - VPS с телефона недоступен
+  **любым** протоколом. Через домашний Wi-Fi работает. Ждать отмены.
+- **ICMP (ping) хостер блокирует намеренно** на своих серверах. Если ping
+  до VPS перестал проходить, а SSH работает - это не обрыв. Проверки
+  доступности (netwatch) надёжнее делать по TCP 443.
+- **Gemini** отклоняет запросы с адресов дата-центров - через VPS не
+  заработает ни при каких настройках. ChatGPT и Claude работают.
+- **Bad State** (сервер не реагирует на кнопки): не нажимать кнопки
+  повторно, сразу тикет. Переустановка ОС и сброс пароля из панели
+  поддерживаются только на серверах, выданных после 20.07.2026.
+- **`H1-H4 = 1, 2, 3, 4` при включённой защите заголовков (3.1) - так и
+  надо, не менять.** По документации Amnezia, при `HeaderProtectionKey` тип
+  пакета шифруется (ChaCha20) и в сети не виден при любых H, а 1-4 - режим
+  совместимости. Диапазоны H вместе с `RandomTrailers` сейчас даже вредны:
+  известная ошибка - транспортные пакеты принимаются за рукопожатие, скорость
+  падает ниже 1 Мбит/с, в журнале `invalid mac1`. Условие для защиты
+  заголовков: все `S1-S4` не меньше 12.
+- **Разные параметры "мусора" клиентам** (`Jc/Jmin/Jmax`) - вики хостера
+  советует, официальная документация Amnezia об этом молчит. Сервер их не
+  сверяет, вреда нет, но и подтверждённой пользы для личного сервера тоже.
+  Если делать - только новым клиентам: `Jc` 3-7, `Jmax` заметно меньше MTU.
+
+---
+
+## Безопасность VPS: что светит и как проверить
+
+- Снаружи должны быть открыты только: UDP порт AmneziaWG, UDP 41641
+  (Tailscale), и 80/443, если на VPS есть сайт. AmneziaWG и Tailscale на
+  скан не отвечают.
+- Проверить, что о сервере знают сканеры (на ПК или VPS, ⛔ IP подставь):
+  `curl -s https://internetdb.shodan.io/ПОДСТАВЬ_IP_VPS`.
+- **Если VPS взломают:** у злоумышленника будут ключи пиров (он сможет
+  выдавать себя за шлюз перед VPS) и выход через твой дом по профилю "Дом".
+  Поэтому: SSH только по ключу, публичный 22 закрыт, лишних служб нет.
+  Подозрение на взлом - переустанови VPS и перевыпусти **все** ключи.
+
+---
+
+### 6.10.6 - Срочная уязвимость ядра, а исправленного ядра ещё нет
+
+Реальный случай - CVE-2026-98432 (TCP ядра, удалённая, 9.8): Debian выпустил
+исправление сразу, Ubuntu - нет. VPS смотрит в интернет, поэтому до выхода
+ядра ставятся обходные меры (они не заменяют новое ядро):
+
+1. Выключить MPTCP (Caddy, AdGuard, Tailscale на Go 1.24+ включают его сами;
+   при выключенном откатываются на обычный TCP):
+
+```
+echo 'net.mptcp.enabled = 0' > /etc/sysctl.d/90-cve-2026-98432.conf
+```
+
+```
+sysctl -w net.mptcp.enabled=0
+```
+
+```
+systemctl restart caddy AdGuardHome tailscaled
+```
+
+**ПРОВЕРКА:** `ss -Mlnp` - пусто.
+
+2. Правило-фильтр отдельной таблицей (весь фаервол не перезагружается).
+   ⚠️ Блок писать **пробелами**: табы при вставке в терминал bash принимает
+   за автодополнение.
+
+```
+printf 'table ip cve_2026_98432 {\n    chain prerouting {\n        type filter hook prerouting priority -300; policy accept;\n        meta l4proto tcp ip hdrlength != 5 drop\n    }\n}\n' > /etc/nftables-cve.nft
+```
+
+```
+nft -c -f /etc/nftables-cve.nft && nft -f /etc/nftables-cve.nft
+```
+
+```
+echo 'include "/etc/nftables-cve.nft"' >> /etc/nftables.conf
+```
+
+**ПРОВЕРКА:** `nft -c -f /etc/nftables.conf` - без ошибок; сайт отвечает `200`.
+
+3. Когда выйдет исправленное ядро - поставить вручную по 6.10.2 (ядро
+   заморожено, проверка DKMS для `amneziawg` до перезагрузки).
+
+---
+
+## Диагностика VPS
+
+| Симптом | Проверка на VPS | Лечение |
+|---|---|---|
+| ни один клиент не подключается | `awg show awg1` (есть ли интерфейс), `ss -ulnp \| grep 51820` | `systemctl restart awg-quick@awg1` |
+| пропал доступ по Tailscale после правки firewall | применили весь `nftables.conf` | `systemctl restart tailscaled` |
+| клиент подключён, интернета нет | `nft list table ip nat` (masquerade на `eth0`?), `sysctl net.ipv4.ip_forward` | Шаги 6.2, 6.4 |
+| "Чебурнет"/"Дом" показывают IP VPS | `awg-who` - подключён не тот профиль? | переключить профиль на устройстве |
+| "Дом" подключён, интернета нет | `ip rule \| grep 5300`, `ip route show table 300`, рукопожатие `gw-backup` в `awg-who` | рестарт `awg-quick@awg1`; на шлюзе - Часть 4 |
+| российские сайты не открываются в VPN | так задумано (`reject` на `ru4`) | профиль "Чебурнет" |
+| `ru4` пуст после перезагрузки | `journalctl -t ru-block -n 5` | `systemctl start ru-block-update` |
+| весь VPN-провайдер блокируют волнами | - | свой адрес, протокол 3.1, держать запасной выход (WARP) |
+| после перезагрузки VPS ни один клиент не подключается | `modinfo amneziawg` - `not found` | ядро обновилось без модуля: загрузить старое ядро (консоль хостера), затем 6.10.2 |
+| VPS заменили / переустановили, конфигов нет | `ls /var/backups/vps/` **на шлюзе** | восстановление из бэкапа (6.10.3) |
+| с телефона на мобильном VPS недоступен, через Wi-Fi работает | - | "белые списки" оператора (6.10.5), ждать |
+| ping до VPS не проходит, SSH работает | - | ICMP режет хостер (6.10.5), это не обрыв |
+
+**На шлюзе** для "Чебурнета/Дома" нужны (Часть 2): маршрут
+`10.78.0.0/24 dev vpn-backup` (в `vpn-slot-up.sh`) и NAT
+`oifname "wan" ip saddr 10.78.0.0/24 masquerade` (в `gwroute.nft`).
+Проверка на шлюзе:
+
+```
+ip route show 10.78.0.0/24
+```
+
+```
+sudo nft list chain ip gwroute nat | grep 10.78
+```

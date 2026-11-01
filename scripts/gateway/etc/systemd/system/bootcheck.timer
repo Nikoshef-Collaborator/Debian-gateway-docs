@@ -1,0 +1,9 @@
+[Unit]
+Description=Run gateway health report 4 min after boot
+
+[Timer]
+OnBootSec=4min
+Unit=bootcheck.service
+
+[Install]
+WantedBy=timers.target

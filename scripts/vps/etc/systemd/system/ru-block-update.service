@@ -1,0 +1,8 @@
+[Unit]
+Description=Fill ru4 set
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ru-block-update.sh
