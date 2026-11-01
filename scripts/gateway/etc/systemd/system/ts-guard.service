@@ -1,0 +1,7 @@
+[Unit]
+Description=Tailscale guard: control plane via tunnel if direct path is blocked
+After=tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ts-guard.sh
