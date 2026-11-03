@@ -5,7 +5,7 @@
 set -u
 cd /
 LIST=""
-for p in etc/amnezia etc/nftables.conf etc/caddy var/www usr/local/sbin \
+for p in etc/amnezia etc/nftables.conf etc/nftables-cve.nft etc/caddy var/www usr/local/sbin \
          etc/systemd/system etc/sysctl.d etc/ssh/sshd_config.d \
          etc/systemd/journald.conf.d etc/apt/apt.conf.d opt/AdGuardHome \
          root/.ssh/authorized_keys etc/hostname etc/netplan; do

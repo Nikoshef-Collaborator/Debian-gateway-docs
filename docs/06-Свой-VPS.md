@@ -766,7 +766,7 @@ cat > /usr/local/sbin/vps-backup-dump.sh <<'EOF'
 set -u
 cd /
 LIST=""
-for p in etc/amnezia etc/nftables.conf etc/caddy var/www usr/local/sbin \
+for p in etc/amnezia etc/nftables.conf etc/nftables-cve.nft etc/caddy var/www usr/local/sbin \
          etc/systemd/system etc/sysctl.d etc/ssh/sshd_config.d \
          etc/systemd/journald.conf.d etc/apt/apt.conf.d opt/AdGuardHome \
          root/.ssh/authorized_keys etc/hostname etc/netplan; do
@@ -1041,6 +1041,111 @@ echo 'include "/etc/nftables-cve.nft"' >> /etc/nftables.conf
 
 3. Когда выйдет исправленное ядро - поставить вручную по 6.10.2 (ядро
    заморожено, проверка DKMS для `amneziawg` до перезагрузки).
+
+---
+
+### 6.10.7 - Переезд на другой хостинг (VPS заблокирован, удалён или взломан)
+
+Бэкап из 6.10.3 - всё, что нужно для переезда. Время - около часа, большая
+часть уходит на установку пакетов и смену адреса у клиентов.
+
+**Сначала реши, было ли у хостера вторжение.** Если хостинг взломали (как
+Beget 02.11.2026 или хостеров с VMmanager в октябре 2026), ключи AmneziaWG
+из старого сервера могли утечь: при распаковке ниже добавь
+`--exclude=etc/amnezia` и сделай ключи заново (Шаги 6.3, 6.6-6.8). Если
+просто заблокировали адрес или удалили сервер - берём всё из архива.
+
+**1. Новый VPS:** только Шаги 6.1 (базовая защита, вход по ключу) и 6.2
+(AmneziaWG). Шаги 6.3-6.8 НЕ делаем - их заменяет архив.
+
+**2. Шлюз** - копия последнего архива, доступная для `scp`:
+
+```
+sudo sh -c 'install -m 600 -o user "$(ls -1t /var/backups/vps/vps-*.tar.gz | head -1)" /tmp/vps-restore.tar.gz' && ls -l /tmp/vps-restore.tar.gz
+```
+
+**3. PowerShell** - забрать на ПК:
+
+```
+scp user@192.168.50.1:/tmp/vps-restore.tar.gz d:\server\
+```
+
+**4. PowerShell** - отдать на новый VPS (⛔ подставь адрес):
+
+```
+scp d:\server\vps-restore.tar.gz root@ПОДСТАВЬ_НОВЫЙ_IP:/root/
+```
+
+**5. Шлюз** - убрать временную копию (в архиве приватные ключи):
+
+```
+rm -f /tmp/vps-restore.tar.gz
+```
+
+**6. Новый VPS** - распаковать. ⛔ Сеть (`netplan`) и имя хоста от старого
+сервера НЕ берём - иначе новый VPS потеряет сеть:
+
+```
+tar xzf /root/vps-restore.tar.gz -C / --exclude=etc/netplan --exclude=etc/hostname && echo OK
+```
+
+**7. Новый VPS** - имя сетевой карты. В `nftables.conf` стоит `eth0`:
+
+```
+ip -br link | grep -v -E '^(lo|awg|tailscale)'
+```
+
+Если карта называется иначе (например `ens3`):
+
+```
+sed -i 's/"eth0"/"ens3"/g' /etc/nftables.conf && grep -c ens3 /etc/nftables.conf
+```
+
+**8. Новый VPS:**
+
+```
+sysctl --system >/dev/null && nft -c -f /etc/nftables.conf && systemctl enable --now nftables && echo FW-OK
+```
+
+**9. Новый VPS** - службы из архива:
+
+```
+systemctl daemon-reload && systemctl enable --now awg-quick@awg1 ru-block-update.timer AdGuardHome && awg show awg1 | head -3
+```
+
+**10. Новый VPS** - Caddy ставится пакетом по Части 7 (конфиг и сайт уже на
+месте), затем `systemctl restart caddy`. Tailscale - по Шагу 6.9 (`tailscale
+up`, вход заново). Новый Tailscale-адрес VPS впиши на шлюзе в `HOSTS` в
+`/usr/local/sbin/vps-backup-pull.sh`.
+
+**11. DNS сайта** - у регистратора/DNS-хостинга смени записи `A` у домена,
+`www` и `photos` на новый адрес. Сертификаты Caddy получит сам, когда DNS
+обновится (от минут до пары часов, зависит от TTL).
+
+**12. Клиенты** - заменить старый адрес на новый. Шлюз (и так же второй
+шлюз, по Tailscale):
+
+```
+sudo sed -i 's/ПОДСТАВЬ_СТАРЫЙ_IP/ПОДСТАВЬ_НОВЫЙ_IP/' /etc/gateway/tunnels/vpn-backup.conf /etc/gateway/tunnels/vpn-amz.conf && grep -h Endpoint /etc/gateway/tunnels/vpn-backup.conf /etc/gateway/tunnels/vpn-amz.conf
+```
+
+```
+sudo systemctl restart vpn-slot@vpn-backup vpn-slot@vpn-amz gw-routing
+```
+
+Телефоны и ПК: в приложении AmneziaVPN/AmneziaWG поменять `Endpoint` в
+профиле или заново импортировать конфиг с новым адресом.
+
+**13. Проверка** - на шлюзе команда из Части 4, раздел 5.1.1 (ожидается
+"всё живо"), на VPS - `awg show awg1` (свежие handshake у клиентов), сайт
+открывается.
+
+**14. Новый VPS** - убрать архив: `rm -f /root/vps-restore.tar.gz`. На ПК
+удали `d:\server\vps-restore.tar.gz`.
+
+> Старый адрес держи в голове: если старый VPS вернётся (как сервер после
+> проверки у хостера), не включай его в работу без проверки на закладки -
+> `authorized_keys`, пользователи, cron, службы. Надёжнее удалить.
 
 ---
 
