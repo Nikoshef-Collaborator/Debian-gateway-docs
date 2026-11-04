@@ -86,7 +86,9 @@ while IFS= read -r src; do
         n_tpl=$((n_tpl+1)); continue
     fi
     if [ ! -e "$live" ]; then
-        echo "  ✗ нет на машине  $rel"; n_miss=$((n_miss+1)); continue
+        if [ -n "${mine[$rel]+x}" ]; then echo "  ◇ нет сознательно $rel${mine[$rel]:+ - ${mine[$rel]}}"; n_mine=$((n_mine+1))
+        else echo "  ✗ нет на машине  $rel"; n_miss=$((n_miss+1)); fi
+        continue
     fi
     if grep -q 'ПОДСТАВЬ' "$src"; then         # шаблон: строки с ПОДСТАВЬ на машине обязаны быть другими
         dd=$(diff "$src" "$live" 2>/dev/null)
