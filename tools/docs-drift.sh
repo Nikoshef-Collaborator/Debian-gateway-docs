@@ -4,7 +4,7 @@
 # и сравнивает каждый с тем же путём на этой машине.
 #   sudo docs-drift.sh                 - отчёт (роль gateway/vps определяется сама)
 #   sudo docs-drift.sh vps             - явно указать роль
-#   sudo docs-drift.sh --diff ПУТЬ     - построчная разница по одному файлу (не для файлов с ключами)
+#   sudo docs-drift.sh --diff ПУТЬ...  - построчная разница по файлам (не для файлов с ключами)
 #   sudo docs-drift.sh -v              - показать и файлы, отличающиеся только комментариями
 # Итог: ✓ совпадает, ≈ только пробелы, ≠ отличается, ✗ нет на машине, ~ шаблон (с ПОДСТАВЬ_ - отличаться обязан),
 #       ? наши скрипты в /usr/local/sbin, которых нет в документации.
@@ -18,26 +18,35 @@ VERBOSE=0; [ "${1:-}" = "-v" ] && { VERBOSE=1; shift; }
 norm(){ grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | sed 's/[[:space:]]*$//'; }
 
 fetch(){
-    if [ -n "${DRIFT_SRC:-}" ]; then cp -a "$DRIFT_SRC/." "$TMP/repo/"; return; fi   # локальная копия scripts/
+    if [ -n "${DRIFT_SRC:-}" ]; then   # локальная копия scripts/ (и tools/ рядом, если есть)
+        cp -a "$DRIFT_SRC/." "$TMP/repo/"
+        [ -d "$DRIFT_SRC/../tools" ] && cp -a "$DRIFT_SRC/../tools/." "$TMP/tools/"
+        return
+    fi
     mkdir -p "$TMP/dl"
     curl -fsSL -m 60 "$REPO" | tar xz -C "$TMP/dl" || { echo "не скачать репозиторий: $REPO" >&2; exit 1; }
     cp -a "$TMP"/dl/*/scripts/. "$TMP/repo/"   # repo/ уже создан: mv положил бы scripts ВНУТРЬ него
+    cp -a "$TMP"/dl/*/tools/. "$TMP/tools/" 2>/dev/null || true
 }
-mkdir -p "$TMP/repo"
+mkdir -p "$TMP/repo" "$TMP/tools"
 
-if [ "${1:-}" = "--diff" ]; then
-    f=${2:?укажи путь, например /usr/local/sbin/gw-feeder.sh}
-    echo "$f" | grep -qE "$SECRET" && { echo "в этом файле ключи/пароли - разницу не показываю"; exit 1; }
+if [ "${1:-}" = "--diff" ]; then   # --diff ПУТЬ [ПУТЬ...]: одно скачивание на все файлы
+    shift; [ $# -gt 0 ] || { echo "укажи путь, например /usr/local/sbin/gw-feeder.sh"; exit 1; }
     fetch
-    for role in gateway vps; do
-        src="$TMP/repo/$role$f"
-        if [ -f "$src" ]; then
-            echo "=== $role: - документация, + машина"
-            diff -u "$src" "$ROOT$f" | tail -n +3
-            exit 0
+    for f in "$@"; do
+        echo "════ $f"
+        if echo "$f" | grep -qE "$SECRET"; then echo "в этом файле ключи/пароли - разницу не показываю"; continue; fi
+        src=""; who=""
+        for role in gateway vps; do [ -f "$TMP/repo/$role$f" ] && { src="$TMP/repo/$role$f"; who=$role; break; }; done
+        if [ -z "$src" ] && [ "$(dirname "$f")" = /usr/local/sbin ] && [ -f "$TMP/tools/$(basename "$f")" ]; then
+            src="$TMP/tools/$(basename "$f")"; who=tools
         fi
+        [ -z "$src" ] && { echo "в документации такого файла нет"; continue; }
+        [ -e "$ROOT$f" ] || { echo "на машине такого файла нет"; continue; }
+        echo "=== $who: - документация, + машина"
+        diff -u "$src" "$ROOT$f" | tail -n +3
     done
-    echo "в документации такого файла нет: $f"; exit 1
+    exit 0
 fi
 
 ROLE="${1:-}"
@@ -98,6 +107,20 @@ while IFS= read -r src; do
     fi
 done < <(find "$BASE" -type f | sort)
 
+# инструменты из tools/ (ставятся скачиванием, Часть 4): сверяем, если стоят
+for src in "$TMP"/tools/*; do
+    [ -f "$src" ] || continue
+    rel="/usr/local/sbin/$(basename "$src")"; live="$ROOT$rel"
+    [ -n "${known[$rel]:-}" ] && continue
+    [ -e "$live" ] || continue
+    known["$rel"]=1
+    if cmp -s "$src" "$live"; then n_ok=$((n_ok+1))
+    elif diff -qwB <(norm "$src") <(norm "$live") >/dev/null 2>&1; then
+        n_ws=$((n_ws+1)); [ "$VERBOSE" = 1 ] && echo "  ≈ комментарии    $rel"
+    else
+        ne "$rel" "tools/, строк кода: $(diff -wB <(norm "$src") <(norm "$live") 2>/dev/null | grep -c '^[<>]')"
+    fi
+done
 echo "  -- в /usr/local/sbin, но нет в документации (кто вызывает; (выкл) - юнит выключен):"
 n_unk=0; baks=""
 for f in "$ROOT"/usr/local/sbin/*; do
