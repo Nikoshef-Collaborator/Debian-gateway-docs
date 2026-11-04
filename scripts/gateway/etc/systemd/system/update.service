@@ -1,0 +1,10 @@
+[Unit]
+Description=System update (apt + zapret2 + Immich check)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/update.sh
+StandardOutput=journal
+StandardError=journal
