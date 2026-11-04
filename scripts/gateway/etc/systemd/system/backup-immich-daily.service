@@ -1,0 +1,9 @@
+[Unit]
+Description=Immich nightly snapshot
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/local/sbin/backup-immich-daily.sh
