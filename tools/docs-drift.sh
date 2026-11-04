@@ -15,8 +15,9 @@ SECRET='(/tunnels/|/pool|tg\.conf|/amnezia/|authorized_keys|\.example$)'
 
 fetch(){
     if [ -n "${DRIFT_SRC:-}" ]; then cp -a "$DRIFT_SRC/." "$TMP/repo/"; return; fi   # локальная копия scripts/
-    curl -fsSL -m 60 "$REPO" | tar xz -C "$TMP" || { echo "не скачать репозиторий: $REPO" >&2; exit 1; }
-    mv "$TMP"/*/scripts "$TMP/repo"
+    mkdir -p "$TMP/dl"
+    curl -fsSL -m 60 "$REPO" | tar xz -C "$TMP/dl" || { echo "не скачать репозиторий: $REPO" >&2; exit 1; }
+    cp -a "$TMP"/dl/*/scripts/. "$TMP/repo/"   # repo/ уже создан: mv положил бы scripts ВНУТРЬ него
 }
 mkdir -p "$TMP/repo"
 
