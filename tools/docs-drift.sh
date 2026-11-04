@@ -83,16 +83,30 @@ while IFS= read -r src; do
     fi
 done < <(find "$BASE" -type f | sort)
 
-echo "  -- в /usr/local/sbin, но нет в документации (кто запускает: юнит/cron/скрипт):"
+echo "  -- в /usr/local/sbin, но нет в документации (кто вызывает; (выкл) - юнит выключен):"
 n_unk=0; baks=""
 for f in "$ROOT"/usr/local/sbin/*; do
     [ -f "$f" ] || continue
     b=$(basename "$f"); rel="/usr/local/sbin/$b"
     [ -n "${known[$rel]:-}" ] && continue
     case "$b" in *.bak*|*~|*.orig|*.old) baks="$baks $b"; continue ;; esac
-    who=$(grep -rlsF "$b" "$ROOT"/etc/systemd/system "$ROOT"/etc/cron* "$ROOT"/var/spool/cron "$ROOT"/etc/OliveTin "$ROOT"/usr/local/sbin 2>/dev/null \
-          | grep -v "/$b\$" | grep -vE '\.bak|~$' | sed "s|^$ROOT||; s|^/etc/systemd/system/||" | head -2 | tr '\n' ' ')
-    printf '  ? %-34s %s\n' "$b" "${who:-НИКТО не запускает}"; n_unk=$((n_unk+1))
+    who=""
+    while IFS= read -r r; do
+        r=${r#"$ROOT"}
+        case "$r" in
+        /etc/systemd/system/*.service)
+            u=${r#/etc/systemd/system/}
+            # включён ли юнит: у сервиса с таймером смотрим таймер
+            [ -f "$ROOT/etc/systemd/system/${u%.service}.timer" ] && u2=${u%.service}.timer || u2=$u
+            st=""; [ -z "$ROOT" ] && st=$(systemctl is-enabled "$u2" 2>/dev/null)
+            case "$st" in disabled|masked) r="$u(выкл)" ;; *) r="$u" ;; esac ;;
+        /etc/systemd/system/*) r=${r#/etc/systemd/system/} ;;
+        esac
+        who="$who$r "
+    done < <(grep -rlsF "$b" "$ROOT"/etc/systemd/system "$ROOT"/etc/cron* "$ROOT"/var/spool/cron "$ROOT"/etc/OliveTin \
+                 "$ROOT"/etc/smartd.conf "$ROOT"/etc/NetworkManager/dispatcher.d "$ROOT"/etc/network "$ROOT"/etc/udev/rules.d \
+                 "$ROOT"/usr/local/sbin 2>/dev/null | grep -v "/$b\$" | grep -vE '\.bak|~$|\.timer$' | head -3)
+    printf '  ? %-34s %s\n' "$b" "${who:-НИКТО не запускает (руками?)}"; n_unk=$((n_unk+1))
 done
 [ "$n_unk" = 0 ] && echo "     нет"
 [ -n "$baks" ] && echo "  -- резервные копии в /usr/local/sbin (место им в /root):$baks"
