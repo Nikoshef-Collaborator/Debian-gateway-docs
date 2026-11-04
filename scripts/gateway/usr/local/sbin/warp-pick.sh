@@ -74,7 +74,7 @@ kick_orch(){ flock -u 9 2>/dev/null; systemctl start gw-orchestrator.service 2>/
 
 [ "$(id -u)" -eq 0 ] || { echo "запускай через sudo"; exit 1; }
 exec 9>/run/warp-pick.lock
-flock -n 9 || { say "другой warp-pick уже работает"; exit 1; }
+flock -n 9 || { say "другой warp-pick уже работает - этот запуск не нужен"; exit 0; }   # 0: не ошибка, иначе служба висит в failed
 
 cfgs=()
 for d in "${POOLS[@]}"; do
