@@ -1,9 +1,19 @@
 #!/bin/bash
 # gw-warp-test.sh <файл_в_pool> - рукопожатие, пинг, скорость на интерфейсе warptest
+# Пул - /etc/gateway/pool или /etc/warp/pool (как у warp-pick).
 set -u
+export LC_ALL=C   # иначе awk пишет скорость с запятой
 [ "$(id -u)" -eq 0 ] || { echo "запускай через sudo"; exit 1; }
-SRC="/etc/gateway/pool/${1:-}"
-[ -f "$SRC" ] || { echo "Использование: $0 <файл_в_pool>"; exit 1; }
+SRC=""
+for d in /etc/gateway/pool /etc/warp/pool; do [ -f "$d/${1:-}" ] && { SRC="$d/$1"; break; }; done
+[ -n "$SRC" ] || { echo "Использование: $0 <файл_в_pool>  (нет в /etc/gateway/pool и /etc/warp/pool)"; exit 1; }
+# Конфиг с тем же ключом, что уже стоит в слоте, тестировать нельзя: Cloudflare
+# пускает трафик только по одному из двух туннелей - рукопожатие есть, скорость 0.
+KEY=$(awk '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); print; exit}' "$SRC")
+for t in /etc/gateway/tunnels/vpn-*.conf; do
+    [ -n "$KEY" ] && [ -f "$t" ] && grep -qF -- "$KEY" "$t" && {
+        echo "этот конфиг сейчас стоит в слоте $(basename "$t" .conf) - тест дал бы скорость 0, выбери другой"; exit 1; }
+done
 TESTIF=warptest; TESTCONF="/etc/gateway/tunnels/${TESTIF}.conf"
 TEST_URL="https://speed.cloudflare.com/__down?bytes=5000000"
 cleanup(){ awg-quick down "$TESTCONF" 2>/dev/null; rm -f "$TESTCONF"; }
