@@ -104,11 +104,16 @@ if [ -n "${SERVICE_GROUP_URLS:-}" ]; then
         name="${pair%%:*}"; url="${pair#*:}"; tmp=$(mktemp)
         if fetch "$url" "$tmp"; then
             grep -oE '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$' "$tmp" > "$GROUPS_DIR/${name}.txt.new"
-            if [ "$(wc -l < "$GROUPS_DIR/${name}.txt.new")" -gt 3 ]; then
+            cnt=$(wc -l < "$GROUPS_DIR/${name}.txt.new")
+            if [ "$cnt" -gt 3 ]; then
                 mv "$GROUPS_DIR/${name}.txt.new" "$GROUPS_DIR/${name}.txt"
+                logger -t "$LOG_TAG" "группа $name: $cnt доменов"
             else
+                logger -t "$LOG_TAG" "ERROR: группа $name подозрительно мала ($cnt), не применяю"
                 rm -f "$GROUPS_DIR/${name}.txt.new"
             fi
+        else
+            logger -t "$LOG_TAG" "ERROR: не скачать группу $name"
         fi
         rm -f "$tmp"
     done
