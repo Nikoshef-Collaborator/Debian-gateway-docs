@@ -3,7 +3,8 @@
 # Боевые слоты (vpn-main/vpn-backup/vpn-amz) не трогает.
 # Конфиг готовится так же, как в warp-pick: Table=off, без DNS/IPv6/Pre-PostUp,
 # AllowedIPs только IPv4, keepalive 25.
-# Результат: скорость_MBps|connect_ms|конфиг (мёртвые: 0|9999|конфиг), лучшие сверху.
+# Результат: скорость_MBps|connect_ms|конфиг, лучшие сверху.
+# Мёртвые: 0|9999|конфиг. Живые, но скорость не измерена (сервер замера отказал): 0|9998|конфиг.
 # Пулы по умолчанию: /etc/warp/pool и /etc/gateway/pool (или POOL=папка).
 set -u
 export LC_ALL=C LC_NUMERIC=C
@@ -51,7 +52,7 @@ for cfg in "${cfgs[@]}"; do
     fi
     ping -c2 -W2 -I "$TESTIF" 1.1.1.1 >/dev/null 2>&1   # пнуть рукопожатие
     hs=0
-    for i in $(seq 1 16); do
+    for _ in $(seq 1 16); do
         h=$(awg show "$TESTIF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
         [ -n "$h" ] && [ "$h" != "0" ] && { hs=1; break; }
         sleep 0.5
@@ -59,15 +60,21 @@ for cfg in "${cfgs[@]}"; do
     if [ "$hs" -eq 0 ]; then
         say "  $name: нет рукопожатия -> мёртв"; echo "0|9999|$cfg" >> "$tmp"; continue
     fi
-    res=$(curl -s --max-time 20 --interface "$TESTIF" -o /dev/null -w '%{speed_download}|%{time_connect}' "$TEST_URL" 2>/dev/null)
-    bps=$(echo "$res" | cut -d'|' -f1 | tr ',' '.' | cut -d'.' -f1)
-    cs=$(echo "$res" | cut -d'|' -f2 | tr ',' '.')
+    res=$(curl -s --max-time 20 --interface "$TESTIF" -o /dev/null -w '%{http_code}|%{speed_download}|%{time_connect}' "$TEST_URL" 2>/dev/null)
+    code=$(echo "$res" | cut -d'|' -f1)
+    bps=$(echo "$res" | cut -d'|' -f2 | tr ',' '.' | cut -d'.' -f1)
+    cs=$(echo "$res" | cut -d'|' -f3 | tr ',' '.')
     mbps=$(awk "BEGIN{printf \"%.1f\", ${bps:-0}/1048576}")
     cms=$(awk "BEGIN{printf \"%.1f\", ${cs:-0}*1000}")
     if awk "BEGIN{exit !(${mbps:-0} > 0.1)}"; then
         say "  $name: ${mbps} MB/s, connect ${cms} ms"; echo "${mbps}|${cms}|$cfg" >> "$tmp"
     else
-        say "  $name: рукопожатие есть, скорость 0 -> мёртв"; echo "0|9999|$cfg" >> "$tmp"
+        if [ -n "$code" ] && [ "$code" != 000 ] && [ "$code" != 200 ]; then
+            # туннель везёт, но сервер замера отказал (например, 429 - слишком часто)
+            say "  $name: живой, сервер замера ответил HTTP $code - скорость не измерена"; echo "0|9998|$cfg" >> "$tmp"
+        else
+            say "  $name: рукопожатие есть, данные не идут -> мёртв"; echo "0|9999|$cfg" >> "$tmp"
+        fi
     fi
 done
 sort -t'|' -k1 -rn "$tmp" > "$RESULTS"; rm -f "$tmp"

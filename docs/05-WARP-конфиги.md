@@ -267,7 +267,7 @@ for cfg in "${cfgs[@]}"; do
     fi
     ping -c2 -W2 -I "$TESTIF" 1.1.1.1 >/dev/null 2>&1   # пнуть рукопожатие
     hs=0
-    for i in $(seq 1 16); do
+    for _ in $(seq 1 16); do
         h=$(awg show "$TESTIF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
         [ -n "$h" ] && [ "$h" != "0" ] && { hs=1; break; }
         sleep 0.5
