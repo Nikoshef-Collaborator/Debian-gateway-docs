@@ -130,6 +130,7 @@ for f in "$ROOT"/usr/local/sbin/*; do
     b=$(basename "$f"); rel="/usr/local/sbin/$b"
     [ -n "${known[$rel]:-}" ] && continue
     case "$b" in *.bak*|*~|*.orig|*.old) baks="$baks $b"; continue ;; esac
+    if [ -n "${mine[$rel]+x}" ]; then n_mine=$((n_mine+1)); [ "$VERBOSE" = 1 ] && echo "  ◇ свой скрипт    $b${mine[$rel]:+ - ${mine[$rel]}}"; continue; fi
     who=""
     while IFS= read -r r; do
         r=${r#"$ROOT"}
