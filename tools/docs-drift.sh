@@ -50,8 +50,23 @@ fetch
 BASE="$TMP/repo/$ROLE"
 [ -d "$BASE" ] || { echo "в репозитории нет scripts/$ROLE"; exit 1; }
 
-declare -A known
-n_ok=0; n_ws=0; n_ne=0; n_miss=0; n_tpl=0
+declare -A known mine
+n_ok=0; n_ws=0; n_ne=0; n_miss=0; n_tpl=0; n_mine=0
+# свои сознательные правки: строка "ПУТЬ  # зачем" в drift-local.conf - такой файл
+# идёт отдельной строкой ◇ и не считается расхождением
+LOCALF="$ROOT/etc/gateway/drift-local.conf"
+if [ -f "$LOCALF" ]; then
+    while IFS= read -r l; do
+        p=${l%%#*}; p=${p//[[:space:]]/}; [ -z "$p" ] && continue
+        n=""; [[ "$l" == *#* ]] && n=${l#*#}
+        mine["$p"]="${n# }"
+    done < "$LOCALF"
+fi
+# ≠ или ◇: $1=путь, $2=пояснение в скобках
+ne(){
+    if [ -n "${mine[$1]+x}" ]; then echo "  ◇ свои правки    $1  ($2)${mine[$1]:+ - ${mine[$1]}}"; n_mine=$((n_mine+1))
+    else echo "  ≠ отличается     $1  ($2)"; n_ne=$((n_ne+1)); fi
+}
 echo "════ сверка: роль $ROLE, $(hostname), $(date '+%F %T') ════"
 while IFS= read -r src; do
     rel=${src#"$BASE"}
@@ -70,7 +85,7 @@ while IFS= read -r src; do
         lp=$(grep '^<' <<<"$dd" | grep -c 'ПОДСТАВЬ')    # заменённые строки с ПОДСТАВЬ
         gt=$(grep -c '^>' <<<"$dd")                      # строки, которые есть только на машине
         if [ "$lt" = 0 ] && [ "$gt" -le "$lp" ]; then n_tpl=$((n_tpl+1))
-        else echo "  ≠ отличается     $rel  (шаблон; лишних строк: $((lt + gt - lp)))"; n_ne=$((n_ne+1)); fi
+        else ne "$rel" "шаблон; лишних строк: $((lt + gt - lp))"; fi
         continue
     fi
     if cmp -s "$src" "$live"; then
@@ -79,7 +94,7 @@ while IFS= read -r src; do
         n_ws=$((n_ws+1)); [ "$VERBOSE" = 1 ] && echo "  ≈ комментарии    $rel"
     else
         d=$(diff -wB <(norm "$src") <(norm "$live") 2>/dev/null | grep -c '^[<>]')
-        echo "  ≠ отличается     $rel  (строк кода: $d)"; n_ne=$((n_ne+1))
+        ne "$rel" "строк кода: $d"
     fi
 done < <(find "$BASE" -type f | sort)
 
@@ -110,5 +125,5 @@ for f in "$ROOT"/usr/local/sbin/*; do
 done
 [ "$n_unk" = 0 ] && echo "     нет"
 [ -n "$baks" ] && echo "  -- резервные копии в /usr/local/sbin (место им в /root):$baks"
-echo "════ итог: ✓ $n_ok  ≈ $n_ws (только комментарии)  ≠ $n_ne  ✗ $n_miss  ~ $n_tpl  ? $n_unk ════"
+echo "════ итог: ✓ $n_ok  ≈ $n_ws (только комментарии)  ◇ $n_mine (свои правки)  ≠ $n_ne  ✗ $n_miss  ~ $n_tpl  ? $n_unk ════"
 echo "Разница по файлу: sudo $0 --diff ПУТЬ"
