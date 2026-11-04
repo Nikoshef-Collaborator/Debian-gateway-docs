@@ -5,6 +5,7 @@
 #   sudo docs-drift.sh                 - отчёт (роль gateway/vps определяется сама)
 #   sudo docs-drift.sh vps             - явно указать роль
 #   sudo docs-drift.sh --diff ПУТЬ     - построчная разница по одному файлу (не для файлов с ключами)
+#   sudo docs-drift.sh -v              - показать и файлы, отличающиеся только комментариями
 # Итог: ✓ совпадает, ≈ только пробелы, ≠ отличается, ✗ нет на машине, ~ шаблон (с ПОДСТАВЬ_ - отличаться обязан),
 #       ? наши скрипты в /usr/local/sbin, которых нет в документации.
 set -u
@@ -12,6 +13,9 @@ REPO="https://github.com/Nikoshef-Collaborator/Debian-gateway-docs/archive/refs/
 ROOT="${ROOT:-}"          # для проверки на копии: ROOT=/путь/к/корню
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 SECRET='(/tunnels/|/pool|tg\.conf|/amnezia/|authorized_keys|\.example$)'
+VERBOSE=0; [ "${1:-}" = "-v" ] && { VERBOSE=1; shift; }
+# без строк-комментариев, пустых строк и хвостовых пробелов: сравниваем код, а не пояснения
+norm(){ grep -vE '^[[:space:]]*(#|$)' "$1" 2>/dev/null | sed 's/[[:space:]]*$//'; }
 
 fetch(){
     if [ -n "${DRIFT_SRC:-}" ]; then cp -a "$DRIFT_SRC/." "$TMP/repo/"; return; fi   # локальная копия scripts/
@@ -71,22 +75,26 @@ while IFS= read -r src; do
     fi
     if cmp -s "$src" "$live"; then
         n_ok=$((n_ok+1))
-    elif diff -qwB "$src" "$live" >/dev/null 2>&1; then
-        echo "  ≈ только пробелы $rel"; n_ws=$((n_ws+1))
+    elif diff -qwB <(norm "$src") <(norm "$live") >/dev/null 2>&1; then
+        n_ws=$((n_ws+1)); [ "$VERBOSE" = 1 ] && echo "  ≈ комментарии    $rel"
     else
-        d=$(diff "$src" "$live" 2>/dev/null | grep -c '^[<>]')
-        echo "  ≠ отличается     $rel  (строк: $d)"; n_ne=$((n_ne+1))
+        d=$(diff -wB <(norm "$src") <(norm "$live") 2>/dev/null | grep -c '^[<>]')
+        echo "  ≠ отличается     $rel  (строк кода: $d)"; n_ne=$((n_ne+1))
     fi
 done < <(find "$BASE" -type f | sort)
 
-echo "  -- наши скрипты, которых нет в документации:"
-n_unk=0
+echo "  -- в /usr/local/sbin, но нет в документации (кто запускает: юнит/cron/скрипт):"
+n_unk=0; baks=""
 for f in "$ROOT"/usr/local/sbin/*; do
     [ -f "$f" ] || continue
-    rel="/usr/local/sbin/$(basename "$f")"
+    b=$(basename "$f"); rel="/usr/local/sbin/$b"
     [ -n "${known[$rel]:-}" ] && continue
-    echo "  ? только на машине $rel"; n_unk=$((n_unk+1))
+    case "$b" in *.bak*|*~|*.orig|*.old) baks="$baks $b"; continue ;; esac
+    who=$(grep -rlsF "$b" "$ROOT"/etc/systemd/system "$ROOT"/etc/cron* "$ROOT"/var/spool/cron "$ROOT"/etc/OliveTin "$ROOT"/usr/local/sbin 2>/dev/null \
+          | grep -v "/$b\$" | grep -vE '\.bak|~$' | sed "s|^$ROOT||; s|^/etc/systemd/system/||" | head -2 | tr '\n' ' ')
+    printf '  ? %-34s %s\n' "$b" "${who:-НИКТО не запускает}"; n_unk=$((n_unk+1))
 done
 [ "$n_unk" = 0 ] && echo "     нет"
-echo "════ итог: ✓ $n_ok  ≈ $n_ws  ≠ $n_ne  ✗ $n_miss  ~ $n_tpl  ? $n_unk ════"
+[ -n "$baks" ] && echo "  -- резервные копии в /usr/local/sbin (место им в /root):$baks"
+echo "════ итог: ✓ $n_ok  ≈ $n_ws (только комментарии)  ≠ $n_ne  ✗ $n_miss  ~ $n_tpl  ? $n_unk ════"
 echo "Разница по файлу: sudo $0 --diff ПУТЬ"
