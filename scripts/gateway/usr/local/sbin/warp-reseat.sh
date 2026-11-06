@@ -6,7 +6,9 @@
 #  3) копия проверяется gw-warp-test: рукопожатие, узел не DME, скорость.
 # Оригиналы не трогает. Копии, не прошедшие проверку, удаляет. Копию, чей
 # ключ сейчас стоит в слоте, не трогает (тест с тем же ключом невозможен).
-# Запуск: sudo warp-reseat.sh   (таймер warp-reseat.timer - раз в неделю)
+# Запуск: sudo warp-reseat.sh          (таймер warp-reseat.timer - раз в неделю)
+#         sudo warp-reseat.sh --test   - обкатка: копии кладутся в /etc/warp/pool-test,
+#                                        warp-pick их не видит, живой пул не меняется
 set -u
 export LC_ALL=C
 WS=/opt/warpscout/warpscout
@@ -19,13 +21,18 @@ SKIP_PORTS="500"   # порты, где ТСПУ режет скорость (е
 CAND_MAX=6         # сколько лучших точек входа брать из скана
 TRY_MAX=3          # сколько точек входа пробовать на один конфиг
 MIN_MBPS=1.0       # медленнее - копию не оставляем
+TESTDIR=/etc/warp/pool-test
+MODE="live"; [ "${1:-}" = "--test" ] && MODE="test"
 
-say(){ echo "[warp-reseat] $*"; logger -t warp-reseat "$*" 2>/dev/null; }
+say(){ local p="[warp-reseat]"; [ "$MODE" = test ] && p="[warp-reseat тест]"; echo "$p $*"; logger -t warp-reseat "$p $*" 2>/dev/null; }
 [ "$(id -u)" -eq 0 ] || { echo "запускай через sudo"; exit 1; }
 { [ -x "$WS" ] && [ -f "$ACC" ]; } || { say "нет $WS или $ACC - Часть 5, Шаг 5.7"; exit 1; }
 exec 9>/run/warp-reseat.lock
 flock -n 9 || { say "уже запущен"; exit 0; }
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+if [ "$MODE" = test ]; then
+    mkdir -p "$TESTDIR" && chmod 700 "$TESTDIR" && rm -f "$TESTDIR"/*-ws.conf
+fi
 
 # точки входа из отчёта: первая таблица, потери 0%; $1 = порты, которые пропустить
 cands(){
@@ -82,7 +89,13 @@ for d in "${POOLS[@]}"; do
     for src in "$d"/*.conf; do
         [ -f "$src" ] || continue
         case "$(basename "$src")" in *-ws.conf) continue ;; esac
-        dst="${src%.conf}-ws.conf"; name=$(basename "$dst")
+        if [ "$MODE" = test ]; then
+            dst="$TESTDIR/$(basename "${src%.conf}")-ws.conf"
+            tname="../pool-test/$(basename "$dst")"   # gw-warp-test ищет от папки пула
+        else
+            dst="${src%.conf}-ws.conf"; tname=$(basename "$dst")
+        fi
+        name=$(basename "$dst")
         if inslot "$src"; then
             say "  $name: ключ сейчас в слоте - не трогаю"; kept=$((kept+1)); continue
         fi
@@ -91,7 +104,7 @@ for d in "${POOLS[@]}"; do
             [ "$k" -ge "$N" ] && break
             ep=${CAND[$(( (n + k) % N ))]}   # по кругу: конфиги расходятся по разным точкам входа
             build "$src" "$dst" "$ep"
-            out=$("$TEST" "$name" 2>&1)
+            out=$("$TEST" "$tname" 2>&1)
             colo=$(echo "$out" | awk -F'[:,] *' '/узел:/{print $2; exit}')
             mbps=$(echo "$out" | awk '/скорость:/{ if ($2 ~ /^[0-9.]+$/) print $2; else print 0; exit }')
             if echo "$out" | grep -q 'РЕЗУЛЬТАТ: OK' && [ -n "$colo" ] && [ "$colo" != "н/д" ] \
@@ -106,8 +119,8 @@ for d in "${POOLS[@]}"; do
     done
 done
 
-# копии, у которых оригинал удалён
-for d in "${POOLS[@]}"; do
+# копии, у которых оригинал удалён (в обкатке не нужно)
+[ "$MODE" = test ] || for d in "${POOLS[@]}"; do
     for f in "$d"/*-ws.conf; do
         [ -f "$f" ] || continue
         [ -f "${f%-ws.conf}.conf" ] && continue
@@ -117,5 +130,6 @@ for d in "${POOLS[@]}"; do
 done
 
 say "готово: пересажено $ok, не прошли $bad, в слоте $kept"
-[ -x /usr/local/sbin/tg-notify.sh ] && /usr/local/sbin/tg-notify.sh "WARP: пересадка пула" "Мимо $AVOID_COLO пересажено $ok, не прошли $bad, в слоте $kept" info
+[ "$MODE" = test ] && say "копии в $TESTDIR - живой пул не тронут"
+[ "$MODE" = test ] || { [ -x /usr/local/sbin/tg-notify.sh ] && /usr/local/sbin/tg-notify.sh "WARP: пересадка пула" "Мимо $AVOID_COLO пересажено $ok, не прошли $bad, в слоте $kept" info; }
 exit 0
