@@ -54,6 +54,10 @@ WARP - это WireGuard от Cloudflare. Чтобы ТСПУ не узнал Wir
 соседняя `162.159.195.0/24` осталась живой - при тех же ключах и маскировке.
 Поэтому в пуле нужны разные адреса.
 
+Ноябрь 2026: на порту `500` ТСПУ режет скорость (около 5 MB/s), на `2408` с
+подходящим мусором - 6-12 MB/s. Какой узел Cloudflare (`DME` = Москва) стоит
+за адресом и как пересадить пул - Шаг 5.7.
+
 ### Jc / Jmin / Jmax
 
 Единого рецепта нет - подбирать. Рабочие варианты из практики и сообщества:
@@ -342,6 +346,263 @@ sudo install -m755 ~/CloudflareWarpSpeedTest /usr/local/sbin/CloudflareWarpSpeed
 
 Гонять раз в несколько недель или когда бенчмарк показал, что живых в пуле
 мало. Не по таймеру.
+
+---
+
+## Шаг 5.7 - Пересадить пул мимо Москвы (`warpscout` + `warp-reseat`)
+
+**Зачем.** Узел Cloudflare, через который идёт туннель, определяется
+**адресом точки входа** (`Endpoint`), а не ключом. Многие адреса ведут в
+московский узел `DME`, а там трафик фильтрует DPI: конфиг живой, но
+мессенджеры то есть, то нет, скорость низкая. Соседние адреса ведут, например,
+в Стокгольм (`ARN`). Ключ и точка входа не связаны - любой конфиг можно
+"пересадить" на хороший адрес.
+
+Реальный замер (ноябрь 2026, один и тот же ключ):
+
+| Точка входа | Мусор | Узел | Скорость |
+|---|---|---|---|
+| старая, порт 500 | свой | `DME` | 4.5 MB/s |
+| стокгольмская, порт 2408 | свой | - | нет рукопожатия |
+| стокгольмская, порт 500 | свой | `ARN` | 5.1 MB/s |
+| стокгольмская, порт 2408 | от warpscout | `ARN` | 6-12 MB/s |
+
+Выводы: **узел задаёт адрес, скорость - порт** (на 500 ТСПУ режет), а на 2408
+нужен мусор, с которым warpscout сам проверил туннель. ⚠️ Страну для сайтов
+это не меняет - Cloudflare всё равно показывает `RU`. От гео-блокировок
+по-прежнему VPS (Часть 6).
+
+Проверить, через какой узел идёт текущий `vpn-main`:
+
+```
+curl -s --interface vpn-main https://cloudflare.com/cdn-cgi/trace | grep -E '^(colo|loc)='
+```
+
+### 5.7.1 - Поставить warpscout
+
+Сканер сообщества (https://github.com/vernette/warpscout, MIT). Работает без
+root и без сетевых интерфейсов (туннель целиком в программе), маршрутизацию
+шлюза не трогает. ⛔ Запускать **на шлюзе**: с клиента трафик к адресам
+Cloudflare уходит в WARP, и сканер мерил бы WARP через WARP.
+
+Версию возьми со страницы релизов (здесь - проверенная `0.16.1`):
+
+```
+sudo mkdir -p /opt/warpscout && cd /tmp && curl -fsSL -o ws.tgz https://github.com/vernette/warpscout/releases/download/v0.16.1/warpscout_0.16.1_linux_amd64.tar.gz && sudo tar xzf ws.tgz -C /opt/warpscout warpscout && sudo chmod 755 /opt/warpscout/warpscout && rm -f ws.tgz
+```
+
+Аккаунт WARP для сканера. Ключ создаётся на шлюзе, в Cloudflare уходит только
+открытая часть; `-relay none` - не пускать регистрацию через чужой прокси:
+
+```
+cd /opt/warpscout && sudo ./warpscout register -relay none && sudo chmod 600 /opt/warpscout/warpscout-account.json
+```
+
+**ОЖИДАЕТСЯ:** `Registered fresh WARP account -> warpscout-account.json`.
+
+Ручной скан (живая табличка на экране; отчёт пишет в файл):
+
+```
+cd /opt/warpscout && sudo ./warpscout scan -p awg -P -exclude-node DME -conf /tmp/warp-scout.conf
+```
+
+В отчёте `warpscout-report-*.txt` - точки входа, потери, узел. Ключей в нём
+нет. ⛔ `/tmp/warp-scout.conf` и `warpscout-account.json` - с приватным
+ключом, в чат не вставлять.
+
+### 5.7.2 - Скрипт пересадки (`warp-reseat`)
+
+Сканирует, для каждого конфига пула делает копию `<имя>-ws.conf` с новой
+точкой входа и мусором из этого же скана, проверяет её `gw-warp-test`
+(Часть 3) и оставляет только прошедшие: рукопожатие есть, узел не `DME`,
+скорость не ниже 1 MB/s. Оригиналы не трогает. `warp-pick` (Часть 2) сначала
+пробует копии `*-ws.conf`.
+
+```
+sudo tee /usr/local/sbin/warp-reseat.sh > /dev/null <<'EOF'
+#!/bin/bash
+# warp-reseat.sh - пересадка пула WARP на точки входа мимо Москвы (узел DME).
+#  1) warpscout ищет точки входа, которые с нашей сети ведут не в DME;
+#  2) каждому конфигу пула - копия <имя>-ws.conf: новая точка входа + мусор
+#     (Jc/Jmin/Jmax/I1), с которым warpscout в ЭТОМ ЖЕ скане прошёл туннель;
+#  3) копия проверяется gw-warp-test: рукопожатие, узел не DME, скорость.
+# Оригиналы не трогает. Копии, не прошедшие проверку, удаляет. Копию, чей
+# ключ сейчас стоит в слоте, не трогает (тест с тем же ключом невозможен).
+# Запуск: sudo warp-reseat.sh   (таймер warp-reseat.timer - раз в неделю)
+set -u
+export LC_ALL=C
+WS=/opt/warpscout/warpscout
+ACC=/opt/warpscout/warpscout-account.json
+POOLS=(/etc/warp/pool /etc/gateway/pool)
+TUNNELS=/etc/gateway/tunnels
+TEST=/usr/local/sbin/gw-warp-test.sh
+AVOID_COLO="DME"   # узлы, на которые не садиться (через запятую)
+SKIP_PORTS="500"   # порты, где ТСПУ режет скорость (если других нет - берём и их)
+CAND_MAX=6         # сколько лучших точек входа брать из скана
+TRY_MAX=3          # сколько точек входа пробовать на один конфиг
+MIN_MBPS=1.0       # медленнее - копию не оставляем
+
+say(){ echo "[warp-reseat] $*"; logger -t warp-reseat "$*" 2>/dev/null; }
+[ "$(id -u)" -eq 0 ] || { echo "запускай через sudo"; exit 1; }
+{ [ -x "$WS" ] && [ -f "$ACC" ]; } || { say "нет $WS или $ACC - Часть 5, Шаг 5.7"; exit 1; }
+exec 9>/run/warp-reseat.lock
+flock -n 9 || { say "уже запущен"; exit 0; }
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+
+# точки входа из отчёта: первая таблица, потери 0%; $1 = порты, которые пропустить
+cands(){
+    awk -v skip=" $1 " '
+        /^ENDPOINT /{t++; next}
+        /^$/{ if (t == 1) exit; next }
+        /^#/{ next }
+        t == 1 && $4 == "0%" { split($1, a, ":"); if (index(skip, " " a[2] " ") == 0) print $1 }
+    ' "$TMP/report.txt" 2>/dev/null | head -n "$CAND_MAX"
+}
+
+scan(){  # $@ - флаги мусора для warpscout
+    rm -f "$TMP/report.txt" "$TMP/scout.conf"
+    (cd "$TMP" && "$WS" scan -a "$ACC" -p awg -P -plain -exclude-node "$AVOID_COLO" \
+        -o "$TMP/report.txt" -conf "$TMP/scout.conf" "$@" >/dev/null 2>&1)
+    cands "$SKIP_PORTS" > "$TMP/cand.txt"
+    [ -s "$TMP/cand.txt" ] || cands "" > "$TMP/cand.txt"
+    [ -s "$TMP/cand.txt" ] && [ -s "$TMP/scout.conf" ]
+}
+
+# ключ конфига сейчас стоит в одном из слотов?
+inslot(){
+    local key
+    key=$(awk '/^[[:space:]]*PrivateKey[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/, ""); print; exit}' "$1")
+    [ -n "$key" ] && grep -qsF -- "$key" "$TUNNELS"/vpn-*.conf
+}
+
+# копия: ключи и адреса из $1, мусор из junk.txt, Endpoint = $3; пишет в $2
+build(){
+    awk -v ep="Endpoint = $3" '
+        NR == FNR { ifl = ifl $0 "\n"; next }
+        /^[[:space:]]*(Jc|Jmin|Jmax|I[1-5]|Endpoint)[[:space:]]*=/ { next }
+        /^\[Interface\]/ { print; printf "%s", ifl; next }
+        /^\[Peer\]/ { print; print ep; next }
+        { print }
+    ' "$TMP/junk.txt" "$1" > "$2"
+    chmod 600 "$2"
+}
+
+if scan; then
+    say "скан: $(wc -l < "$TMP/cand.txt") точек входа мимо $AVOID_COLO, мусор по умолчанию warpscout"
+elif scan -gen-junk -gen-i1 quic; then
+    say "скан: с мусором по умолчанию пусто - взят случайный мусор и I1 под QUIC"
+else
+    say "скан не нашёл точек входа мимо $AVOID_COLO - пул не трогаю"; exit 1
+fi
+grep -E '^[[:space:]]*(Jc|Jmin|Jmax|I[1-5])[[:space:]]*=' "$TMP/scout.conf" > "$TMP/junk.txt"
+rm -f "$TMP/scout.conf"   # в нём ключ аккаунта warpscout - не держим дольше нужного
+mapfile -t CAND < "$TMP/cand.txt"
+N=${#CAND[@]}
+
+ok=0; bad=0; kept=0; n=0
+for d in "${POOLS[@]}"; do
+    for src in "$d"/*.conf; do
+        [ -f "$src" ] || continue
+        case "$(basename "$src")" in *-ws.conf) continue ;; esac
+        dst="${src%.conf}-ws.conf"; name=$(basename "$dst")
+        if inslot "$src"; then
+            say "  $name: ключ сейчас в слоте - не трогаю"; kept=$((kept+1)); continue
+        fi
+        done1=0
+        for k in $(seq 0 $((TRY_MAX - 1))); do
+            [ "$k" -ge "$N" ] && break
+            ep=${CAND[$(( (n + k) % N ))]}   # по кругу: конфиги расходятся по разным точкам входа
+            build "$src" "$dst" "$ep"
+            out=$("$TEST" "$name" 2>&1)
+            colo=$(echo "$out" | awk -F'[:,] *' '/узел:/{print $2; exit}')
+            mbps=$(echo "$out" | awk '/скорость:/{ if ($2 ~ /^[0-9.]+$/) print $2; else print 0; exit }')
+            if echo "$out" | grep -q 'РЕЗУЛЬТАТ: OK' && [ -n "$colo" ] && [ "$colo" != "н/д" ] \
+               && ! echo ",$AVOID_COLO," | grep -q ",$colo," \
+               && awk -v s="${mbps:-0}" -v m="$MIN_MBPS" 'BEGIN{exit !(s >= m)}'; then
+                say "  $name: $ep -> узел $colo, $mbps MB/s"; done1=1; break
+            fi
+            say "  $name: $ep не прошёл (узел ${colo:-н/д}, ${mbps:-0} MB/s)"
+        done
+        if [ "$done1" -eq 1 ]; then ok=$((ok+1)); else rm -f "$dst"; bad=$((bad+1)); fi
+        n=$((n+1))
+    done
+done
+
+# копии, у которых оригинал удалён
+for d in "${POOLS[@]}"; do
+    for f in "$d"/*-ws.conf; do
+        [ -f "$f" ] || continue
+        [ -f "${f%-ws.conf}.conf" ] && continue
+        inslot "$f" && continue
+        rm -f "$f"; say "  удалена копия без оригинала: $(basename "$f")"
+    done
+done
+
+say "готово: пересажено $ok, не прошли $bad, в слоте $kept"
+[ -x /usr/local/sbin/tg-notify.sh ] && /usr/local/sbin/tg-notify.sh "WARP: пересадка пула" "Мимо $AVOID_COLO пересажено $ok, не прошли $bad, в слоте $kept" info
+exit 0
+EOF
+```
+
+```
+sudo chmod 755 /usr/local/sbin/warp-reseat.sh
+```
+
+Первый прогон руками (5-30 минут: скан + проверка каждой копии с загрузкой 5 МБ):
+
+```
+sudo /usr/local/sbin/warp-reseat.sh 2>&1 | tee /tmp/warp-reseat.log
+```
+
+**ОЖИДАЕТСЯ:** `скан: N точек входа мимо DME`, строки `<имя>-ws.conf: адрес -> узел ARN, X MB/s`,
+в конце `готово: пересажено N`. В пуле появились файлы `*-ws.conf`.
+
+Раз в неделю сам (суббота 05:10, после ночного бэкапа и до утра):
+
+```
+sudo tee /etc/systemd/system/warp-reseat.service > /dev/null <<'EOF'
+[Unit]
+Description=WARP pool reseat past DME (warp-reseat)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/warp-reseat.sh
+Nice=10
+TimeoutStartSec=1h
+EOF
+```
+
+```
+sudo tee /etc/systemd/system/warp-reseat.timer > /dev/null <<'EOF'
+[Unit]
+Description=WARP pool reseat weekly
+
+[Timer]
+OnCalendar=Sat *-*-* 05:10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+```
+
+```
+sudo systemctl daemon-reload && sudo systemctl enable --now warp-reseat.timer && systemctl list-timers warp-reseat.timer --no-pager
+```
+
+Перейти на пересаженный конфиг сразу, не дожидаясь ротации:
+
+```
+sudo systemctl start warp-rotate.service; journalctl -t warp-pick -n 15 --no-pager
+```
+
+**ОЖИДАЕТСЯ:** `попытка 1/5: <имя>-ws.conf`, `OK: ... узел ARN`, `ВЫБРАН`.
+
+> Если скан перестал находить узлы мимо `DME` (Cloudflare поменял маршруты),
+> `warp-reseat` пишет об этом и пул не трогает, а `warp-pick` работает по
+> оригиналам, как раньше. Другой узел, которого надо избегать, - в
+> `AVOID_COLO` обоих скриптов через запятую.
 
 ---
 

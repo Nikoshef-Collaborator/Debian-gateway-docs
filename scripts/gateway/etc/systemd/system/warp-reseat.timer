@@ -1,0 +1,9 @@
+[Unit]
+Description=WARP pool reseat weekly
+
+[Timer]
+OnCalendar=Sat *-*-* 05:10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

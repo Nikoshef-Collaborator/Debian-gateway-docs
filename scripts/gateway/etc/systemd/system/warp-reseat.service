@@ -1,0 +1,9 @@
+[Unit]
+Description=WARP pool reseat past DME (warp-reseat)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/warp-reseat.sh
+Nice=10
+TimeoutStartSec=1h
