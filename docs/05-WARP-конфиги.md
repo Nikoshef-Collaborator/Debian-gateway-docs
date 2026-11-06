@@ -525,17 +525,19 @@ for d in "${POOLS[@]}"; do
         for k in $(seq 0 $((TRY_MAX - 1))); do
             [ "$k" -ge "$N" ] && break
             ep=${CAND[$(( (n + k) % N ))]}   # по кругу: конфиги расходятся по разным точкам входа
-            build "$src" "$dst" "$ep"
-            out=$("$TEST" "$tname" 2>&1)
+            build "$src" "$dst.new" "$ep"   # .new не попадает под *.conf - warp-pick его не возьмёт
+            out=$("$TEST" "$tname.new" 2>&1)
             colo=$(echo "$out" | awk -F'[:,] *' '/узел:/{print $2; exit}')
             mbps=$(echo "$out" | awk '/скорость:/{ if ($2 ~ /^[0-9.]+$/) print $2; else print 0; exit }')
             if echo "$out" | grep -q 'РЕЗУЛЬТАТ: OK' && [ -n "$colo" ] && [ "$colo" != "н/д" ] \
                && ! echo ",$AVOID_COLO," | grep -q ",$colo," \
                && awk -v s="${mbps:-0}" -v m="$MIN_MBPS" 'BEGIN{exit !(s >= m)}'; then
+                mv -f "$dst.new" "$dst"   # подмена одним действием, только проверенного
                 say "  $name: $ep -> узел $colo, $mbps MB/s"; done1=1; break
             fi
             say "  $name: $ep не прошёл (узел ${colo:-н/д}, ${mbps:-0} MB/s)"
         done
+        rm -f "$dst.new"
         if [ "$done1" -eq 1 ]; then ok=$((ok+1)); else rm -f "$dst"; bad=$((bad+1)); fi
         n=$((n+1))
     done

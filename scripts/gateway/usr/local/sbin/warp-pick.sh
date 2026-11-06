@@ -106,8 +106,13 @@ if curl --interface vpn-backup -s -o /dev/null -m5 https://cloudflare.com/cdn-cg
     conntrack -F 2>/dev/null || true
 fi
 
-# сначала пересаженные мимо Москвы (*-ws.conf), потом остальные - каждая группа вперемешку
-mapfile -t order < <({ printf '%s\n' "${cfgs[@]}" | grep -- '-ws\.conf$' | shuf; printf '%s\n' "${cfgs[@]}" | grep -v -- '-ws\.conf$' | shuf; })
+# порядок: до WS_FIRST пересаженных мимо Москвы (*-ws.conf), потом оригиналы, потом
+# остальные копии. Не все попытки на копии: у копий одна маскировка, и если ТСПУ
+# её распознает, умрут все разом - тогда нужен шанс на оригинал.
+WS_FIRST=3
+mapfile -t wsc < <(printf '%s\n' "${cfgs[@]}" | grep -- '-ws\.conf$' | shuf)
+mapfile -t orig < <(printf '%s\n' "${cfgs[@]}" | grep -v -- '-ws\.conf$' | shuf)
+order=("${wsc[@]:0:WS_FIRST}" "${orig[@]}" "${wsc[@]:WS_FIRST}")
 i=0
 for pick in "${order[@]}"; do
     i=$((i+1)); [ "$i" -gt "$ATTEMPTS" ] && break
