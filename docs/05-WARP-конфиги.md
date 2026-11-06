@@ -413,7 +413,10 @@ cd /opt/warpscout && sudo ./warpscout scan -p awg -P -exclude-node DME -conf /tm
 ### 5.7.2 - Скрипт пересадки (`warp-reseat`)
 
 Сканирует, для каждого конфига пула делает копию `<имя>-ws.conf` с новой
-точкой входа и мусором из этого же скана, проверяет её `gw-warp-test`
+точкой входа и **своим** мусором (случайные Jc/Jmin/Jmax и I1 под QUIC -
+warpscout проверяет их на этой точке входа; у каждой копии свой рисунок, и
+ТСПУ не погасит их все разом по одному шаблону; не прошёл - общий проверенный
+набор из скана), проверяет её `gw-warp-test`
 (Часть 3) и оставляет только прошедшие: рукопожатие есть, узел не `DME`,
 скорость не ниже 1 MB/s. Оригиналы не трогает. `warp-pick` (Часть 2) сначала
 пробует копии `*-ws.conf`.
@@ -423,8 +426,9 @@ sudo tee /usr/local/sbin/warp-reseat.sh > /dev/null <<'EOF'
 #!/bin/bash
 # warp-reseat.sh - пересадка пула WARP на точки входа мимо Москвы (узел DME).
 #  1) warpscout ищет точки входа, которые с нашей сети ведут не в DME;
-#  2) каждому конфигу пула - копия <имя>-ws.conf: новая точка входа + мусор
-#     (Jc/Jmin/Jmax/I1), с которым warpscout в ЭТОМ ЖЕ скане прошёл туннель;
+#  2) каждому конфигу пула - копия <имя>-ws.conf: новая точка входа + СВОЙ мусор
+#     (случайные Jc/Jmin/Jmax и I1 под QUIC), который warpscout тут же проверяет
+#     на этой точке входа; не прошёл - общий набор из скана (тоже проверенный);
 #  3) копия проверяется gw-warp-test: рукопожатие, узел не DME, скорость.
 # Оригиналы не трогает. Копии, не прошедшие проверку, удаляет. Копию, чей
 # ключ сейчас стоит в слоте, не трогает (тест с тем же ключом невозможен).
@@ -443,6 +447,7 @@ SKIP_PORTS="500"   # порты, где ТСПУ режет скорость (е
 CAND_MAX=6         # сколько лучших точек входа брать из скана
 TRY_MAX=3          # сколько точек входа пробовать на один конфиг
 MIN_MBPS=1.0       # медленнее - копию не оставляем
+JUNK_MODE="unique" # unique - свой мусор на каждую копию; template - один набор из скана на все
 TESTDIR=/etc/warp/pool-test
 MODE="live"; [ "${1:-}" = "--test" ] && MODE="test"
 
@@ -482,7 +487,17 @@ inslot(){
     [ -n "$key" ] && grep -qsF -- "$key" "$TUNNELS"/vpn-*.conf
 }
 
-# копия: ключи и адреса из $1, мусор из junk.txt, Endpoint = $3; пишет в $2
+# свой мусор для точки входа $1 (ip:port) -> $TMP/junk1.txt. warpscout генерирует
+# случайные Jc/Jmin/Jmax и I1 под QUIC и проверяет туннель с ними; конфиг печатает
+# в поток (там ключ сканера) - берём из него только строки мусора
+genjunk(){
+    (cd "$TMP" && "$WS" scan -a "$ACC" -p awg -P -plain -no-report -target "${1%:*}" -port "${1##*:}" \
+        -exclude-node "$AVOID_COLO" -gen-junk -gen-i1 quic -conf - 2>/dev/null) \
+        | grep -E '^[[:space:]]*(Jc|Jmin|Jmax|I[1-5])[[:space:]]*=' > "$TMP/junk1.txt"
+    grep -q '^[[:space:]]*I1' "$TMP/junk1.txt"
+}
+
+# копия: ключи и адреса из $1, мусор из файла $4, Endpoint = $3; пишет в $2
 build(){
     awk -v ep="Endpoint = $3" '
         NR == FNR { ifl = ifl $0 "\n"; next }
@@ -490,7 +505,7 @@ build(){
         /^\[Interface\]/ { print; printf "%s", ifl; next }
         /^\[Peer\]/ { print; print ep; next }
         { print }
-    ' "$TMP/junk.txt" "$1" > "$2"
+    ' "$4" "$1" > "$2"
     chmod 600 "$2"
 }
 
@@ -525,17 +540,23 @@ for d in "${POOLS[@]}"; do
         for k in $(seq 0 $((TRY_MAX - 1))); do
             [ "$k" -ge "$N" ] && break
             ep=${CAND[$(( (n + k) % N ))]}   # по кругу: конфиги расходятся по разным точкам входа
-            build "$src" "$dst.new" "$ep"   # .new не попадает под *.conf - warp-pick его не возьмёт
-            out=$("$TEST" "$tname.new" 2>&1)
-            colo=$(echo "$out" | awk -F'[:,] *' '/узел:/{print $2; exit}')
-            mbps=$(echo "$out" | awk '/скорость:/{ if ($2 ~ /^[0-9.]+$/) print $2; else print 0; exit }')
-            if echo "$out" | grep -q 'РЕЗУЛЬТАТ: OK' && [ -n "$colo" ] && [ "$colo" != "н/д" ] \
-               && ! echo ",$AVOID_COLO," | grep -q ",$colo," \
-               && awk -v s="${mbps:-0}" -v m="$MIN_MBPS" 'BEGIN{exit !(s >= m)}'; then
-                mv -f "$dst.new" "$dst"   # подмена одним действием, только проверенного
-                say "  $name: $ep -> узел $colo, $mbps MB/s"; done1=1; break
-            fi
-            say "  $name: $ep не прошёл (узел ${colo:-н/д}, ${mbps:-0} MB/s)"
+            jlist="$TMP/junk.txt"
+            [ "$JUNK_MODE" = unique ] && genjunk "$ep" && jlist="$TMP/junk1.txt $TMP/junk.txt"
+            for jf in $jlist; do
+                how="общий мусор"; [ "$jf" = "$TMP/junk1.txt" ] && how="свой мусор"
+                build "$src" "$dst.new" "$ep" "$jf"   # .new не попадает под *.conf - warp-pick его не возьмёт
+                out=$("$TEST" "$tname.new" 2>&1)
+                colo=$(echo "$out" | awk -F'[:,] *' '/узел:/{print $2; exit}')
+                mbps=$(echo "$out" | awk '/скорость:/{ if ($2 ~ /^[0-9.]+$/) print $2; else print 0; exit }')
+                if echo "$out" | grep -q 'РЕЗУЛЬТАТ: OK' && [ -n "$colo" ] && [ "$colo" != "н/д" ] \
+                   && ! echo ",$AVOID_COLO," | grep -q ",$colo," \
+                   && awk -v s="${mbps:-0}" -v m="$MIN_MBPS" 'BEGIN{exit !(s >= m)}'; then
+                    mv -f "$dst.new" "$dst"   # подмена одним действием, только проверенного
+                    say "  $name: $ep ($how) -> узел $colo, $mbps MB/s"; done1=1; break
+                fi
+                say "  $name: $ep ($how) не прошёл (узел ${colo:-н/д}, ${mbps:-0} MB/s)"
+            done
+            [ "$done1" -eq 1 ] && break
         done
         rm -f "$dst.new"
         if [ "$done1" -eq 1 ]; then ok=$((ok+1)); else rm -f "$dst"; bad=$((bad+1)); fi
