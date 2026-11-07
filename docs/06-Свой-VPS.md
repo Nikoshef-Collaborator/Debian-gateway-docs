@@ -201,45 +201,86 @@ Tailscale** - пропадает доступ по Tailscale. На работа�
 вноси **двумя способами сразу**: живой командой `nft add/insert` и той же
 строкой в файл.
 
-**Первая настройка на новом сервере** (Tailscale ещё не стоит):
+**Первая настройка на новом сервере** (Tailscale ещё не стоит). Строки для
+AdGuard Home, Tailscale и сайта безвредны, пока этих служб нет; ⛔ кроме
+`dnat` на AdGuard Home - см. комментарий в файле. Сначала папка для
+сохранённого списка `ru4` (Шаг 6.5):
+
+```
+mkdir -p /etc/nftables.d
+```
+
+Сам файл:
 
 ```
 tee /etc/nftables.conf > /dev/null <<'EOF'
 #!/usr/sbin/nft -f
 flush ruleset
 
+# Имя сетевой карты в интернет (Шаг 6.3: ip route show default -> после dev)
+define WAN_IF = "eth0"
+define VPN_IF = { "awg1" }
+define VPN_NET = 10.78.0.0/24
+# Порт tailscaled (PORT в /etc/default/tailscaled)
+define TS_PORT = 41641
+
 table inet filter {
-    # российские подсети (наполняет ru-block-update.sh)
-    set ru4 { type ipv4_addr; flags interval; auto-merge; }
+    # российские сети (наполняет ru-block-update.sh, Шаг 6.5)
+    set ru4 {
+        type ipv4_addr
+        flags interval
+        auto-merge
+    }
 
     chain input {
         type filter hook input priority 0; policy drop;
-        iif "lo" accept
         ct state established,related accept
         ct state invalid drop
+        iif "lo" accept
+        # адреса Tailscale принимаем только с его интерфейса (защита от подмены)
+        ip saddr 100.64.0.0/10 iifname != "tailscale0" drop
         meta l4proto icmp accept
-        udp dport 51820 accept          # AmneziaWG
-        udp dport 41641 accept          # Tailscale напрямую
-        iifname "awg1" accept           # из туннеля - всё (SSH по 10.78.0.1)
-        iifname "tailscale0" accept
-        tcp dport 22 accept             # ⛔ убрать после проверки SSH по туннелю
+        meta l4proto ipv6-icmp accept
+        # DHCP от хостера (адрес VPS выдаётся по DHCP)
+        udp sport 67 udp dport 68 accept
+        udp sport 547 udp dport 546 accept
+        # SSH - только из туннеля и из Tailscale
+        iifname $VPN_IF tcp dport 22 accept
+        iifname "tailscale0" tcp dport 22 accept
+        tcp dport 22 accept             # ⛔ временно: убрать после проверки SSH по туннелю
+        udp dport 51820 accept          # AmneziaWG - порт из ListenPort (Шаг 6.3)
+        # AdGuard Home: DNS только для клиентов туннеля, панель только из Tailscale
+        iifname "awg1" meta l4proto { tcp, udp } th dport 53 accept
+        iifname "tailscale0" tcp dport 3000 accept
+        # сайт (Caddy, Часть 7): HTTP, HTTPS, HTTP/3
+        tcp dport { 80, 443 } accept
+        udp dport 443 accept
     }
 
     chain forward {
         type filter hook forward priority 0; policy drop;
+        tcp flags syn tcp option maxseg size set rt mtu
         ct state established,related accept
+        ct state invalid drop
+        # ПК и телефон (.2/.3) -> SSH к шлюзам по их адресам в туннеле (запасной вход)
+        iifname "awg1" oifname "awg1" ip saddr { 10.78.0.2, 10.78.0.3 } ip daddr { 10.78.0.6 } tcp dport 22 accept
         # Чебурнет (.8/.9): российские адреса - домой через шлюз
         iifname "awg1" oifname "awg1" ip saddr { 10.78.0.8, 10.78.0.9 } ip daddr @ru4 accept
         # Дом (.10/.11): весь трафик домой
         iifname "awg1" oifname "awg1" ip saddr { 10.78.0.10, 10.78.0.11 } accept
-        # Остальным клиентам туннеля российские адреса запрещены:
-        # РФ-приложения не должны видеть IP VPS
-        iifname "awg1" ip daddr @ru4 reject
+        # остальным клиентам российские адреса запрещены: РФ-приложения не
+        # должны видеть IP VPS. Отказ сразу (reset), а не молчание - приложение
+        # не висит на таймауте
+        iifname $VPN_IF ip daddr @ru4 meta l4proto tcp counter reject with tcp reset
+        iifname $VPN_IF ip daddr @ru4 counter reject with icmpx type admin-prohibited
+        # не даём клиентам обойти свой DNS через DNS-over-TLS (Android "Частный DNS")
+        iifname $VPN_IF tcp dport 853 counter reject with tcp reset
+        iifname $VPN_IF udp dport 853 counter reject with icmpx type admin-prohibited
         # выход в интернет
-        iifname "awg1" oifname "eth0" accept
+        iifname $VPN_IF oifname $WAN_IF accept
     }
 
-    # Метка для профилей "Чебурнет" и "Дом" -> таблица 300 -> пир шлюза
+    # метка для профилей "Чебурнет" и "Дом" -> таблица 300 -> пир шлюза
     chain ru_home {
         type filter hook prerouting priority mangle; policy accept;
         iifname "awg1" ip saddr { 10.78.0.8, 10.78.0.9 } ip daddr @ru4 meta mark set 0x300
@@ -248,15 +289,30 @@ table inet filter {
 
     chain output {
         type filter hook output priority 0; policy accept;
+        # Tailscale: никакого прямого WireGuard с российскими адресами, только
+        # через релей (DERP) - IP сервера не светится из России как WireGuard
+        udp sport $TS_PORT ip daddr @ru4 counter drop
     }
 }
 
 table ip nat {
+    # Любой DNS-запрос клиента туннеля (на 1.1.1.1 и куда угодно) -> AdGuard Home.
+    # ⛔ Только если AdGuard Home стоит и слушает 10.78.0.1:53 - иначе у клиентов
+    # пропадёт DNS. Без AdGuard Home этот chain удали.
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "awg1" meta l4proto { tcp, udp } th dport 53 counter dnat to 10.78.0.1
+    }
+
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname "eth0" ip saddr 10.78.0.0/24 masquerade
+        ip saddr $VPN_NET oifname $WAN_IF masquerade
     }
 }
+
+# сохранённый список ru4 (пишет ru-block-update.sh) - после перезагрузки
+# набор сразу полный, не ждёт обновления
+include "/etc/nftables.d/*.nft"
 EOF
 ```
 
@@ -277,7 +333,7 @@ systemctl restart nftables
 Проверь вход по SSH в **новом** окне. Не входит - консоль хостера,
 `nft flush ruleset`, ищи ошибку.
 
-> Строку `tcp dport 22 accept` убери, когда убедишься, что SSH работает по
+> Строку `tcp dport 22 accept` (с пометкой ⛔) убери, когда убедишься, что SSH работает по
 > туннелю (`ssh root@10.78.0.1` с подключённого клиента) или по Tailscale.
 > Публичный порт 22 сканируют постоянно. Запасной вход - консоль в панели
 > хостера.
@@ -288,20 +344,106 @@ systemctl restart nftables
 
 ```
 tee /usr/local/sbin/ru-block-update.sh > /dev/null <<'EOF'
-#!/bin/bash
-# ru-block-update.sh - наполнить набор inet filter ru4 российскими подсетями.
-# Набор очищается только после успешной загрузки списка.
-set -u
-URL="https://www.ipdeny.com/ipblocks/data/countries/ru.zone"
-tmp=$(mktemp); d=$(mktemp -d)
-curl -fsS --max-time 60 "$URL" -o "$tmp" || { logger -t ru-block "ERROR: не скачать"; exit 1; }
-n=$(grep -cE '^[0-9]+\.' "$tmp")
-[ "$n" -gt 1000 ] || { logger -t ru-block "ERROR: мало подсетей ($n), не применяю"; exit 1; }
-grep -E '^[0-9]+\.' "$tmp" | split -l 500 - "$d/c_"
-nft flush set inet filter ru4
-for f in "$d"/c_*; do nft add element inet filter ru4 "{ $(paste -sd, "$f") }"; done
-rm -rf "$tmp" "$d"
-logger -t ru-block "ru4: $n подсетей"
+#!/bin/sh
+# ru-block-update.sh - обновляет набор inet filter ru4 списком российских сетей
+# (ipdeny.com). Клиентам туннеля соединения на эти адреса запрещены (Шаг 6.4).
+#
+# Защиты:
+#  - в набор попадают только строки вида a.b.c.d/nn;
+#  - меньше MIN_LINES сетей -> сбой загрузки, ничего не меняем;
+#  - новый список меньше MIN_RATIO% или больше MAX_RATIO% текущего -> ничего не меняем;
+#  - западные контрольные адреса в списке или нет российских -> ничего не меняем;
+#  - замена набора одной транзакцией nft: либо целиком новый, либо старый,
+#    пустого набора не бывает ни на миг;
+#  - список сохраняется в /etc/nftables.d/ru4.nft - после перезагрузки сразу на месте.
+set -eu
+
+URL="${URL:-https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone}"
+OUT="${OUT:-/etc/nftables.d/ru4.nft}"
+MIN_LINES="${MIN_LINES:-5000}"
+MIN_RATIO="${MIN_RATIO:-80}"
+MAX_RATIO="${MAX_RATIO:-125}"
+# 1.1.1.1/8.8.8.8/9.9.9.9 - DNS; 149.154.167.50 - Telegram; 142.250.0.1 - Google;
+# 104.16.0.1 - Cloudflare; 140.82.112.3 - GitHub; последний - адрес самого VPS
+SENTINEL_WEST="${SENTINEL_WEST:-1.1.1.1 8.8.8.8 9.9.9.9 149.154.167.50 142.250.0.1 104.16.0.1 140.82.112.3 ПОДСТАВЬ_IP_VPS}"
+# 77.88.8.8 - Яндекс DNS
+SENTINEL_RU="${SENTINEL_RU:-77.88.8.8}"
+
+TMP="$(mktemp)"
+NEW="$(mktemp)"
+trap 'rm -f "$TMP" "$TMP.ok" "$TMP.err" "$NEW"' EXIT
+
+curl -fsS --max-time 120 "$URL" -o "$TMP"
+
+# Строго: 4 октета 0-255 и маска 8-32. Всё прочее отбрасываем,
+# чтобы nft никогда не увидел строку, которую примет за имя хоста.
+# (без ведущих нулей: "001" nft тоже принял бы за имя хоста)
+awk -F'[./]' 'NF == 5 && $0 ~ /^((0|[1-9][0-9]?[0-9]?)\.)((0|[1-9][0-9]?[0-9]?)\.)((0|[1-9][0-9]?[0-9]?)\.)(0|[1-9][0-9]?[0-9]?)\/[0-9][0-9]?$/ \
+    && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255 && $5 >= 8 && $5 <= 32' \
+    "$TMP" > "$TMP.ok"
+BAD="$(grep -cv '^[[:space:]]*$' "$TMP" || true)"
+BAD=$((BAD - $(wc -l < "$TMP.ok")))
+if [ "$BAD" -gt 0 ]; then
+    echo "ru-block: отброшено строк с неверным форматом: $BAD" >&2
+fi
+
+N="$(wc -l < "$TMP.ok")"
+if [ "$N" -lt "$MIN_LINES" ]; then
+    echo "ru-block: в списке всего $N сетей (< $MIN_LINES), похоже на сбой загрузки - ничего не меняю" >&2
+    exit 1
+fi
+
+OLD=0
+if [ -f "$OUT" ]; then
+    OLD="$(grep -o '/' "$OUT" | wc -l)"
+fi
+if [ "$OLD" -gt 0 ] && [ $((N * 100)) -lt $((OLD * MIN_RATIO)) ]; then
+    echo "ru-block: новый список $N сетей, был $OLD (меньше ${MIN_RATIO}%) - подозрительно, ничего не меняю" >&2
+    exit 1
+fi
+
+if [ "$OLD" -gt 0 ] && [ $((N * 100)) -gt $((OLD * MAX_RATIO)) ]; then
+    echo "ru-block: новый список $N сетей, был $OLD (рост больше ${MAX_RATIO}%) - подозрительно, ничего не меняю" >&2
+    exit 1
+fi
+
+# Контрольные адреса. WEST - не должны попасть в набор (иначе сломаем
+# западные сервисы для клиентов). RU - обязаны быть (иначе список не тот).
+inlist() {  # $1 - адреса через пробел; печатает те, что покрыты списком
+    awk -v s="$1" '
+        function ip(a,  p) { split(a, p, "."); return ((p[1]*256 + p[2])*256 + p[3])*256 + p[4] }
+        BEGIN { n = split(s, S, " ") }
+        { split($0, c, "/"); b = ip(c[1]); m = 2 ^ (32 - c[2])
+          for (i = 1; i <= n; i++) { x = ip(S[i]); if (x >= b && x < b + m) hit[S[i]] = 1 } }
+        END { for (k in hit) print k }' "$TMP.ok"
+}
+W_HIT="$(inlist "$SENTINEL_WEST")"
+if [ -n "$W_HIT" ]; then
+    echo "ru-block: в список попали западные контрольные адреса: $(echo $W_HIT) - ничего не меняю" >&2
+    exit 1
+fi
+R_HIT="$(inlist "$SENTINEL_RU" | wc -l)"
+if [ "$R_HIT" -ne "$(echo $SENTINEL_RU | wc -w)" ]; then
+    echo "ru-block: в списке нет обязательных российских адресов ($SENTINEL_RU) - ничего не меняю" >&2
+    exit 1
+fi
+
+{
+    echo "flush set inet filter ru4"
+    printf 'add element inet filter ru4 { '
+    paste -sd, "$TMP.ok"
+    echo ' }'
+} > "$NEW"
+
+if ! nft -c -f "$NEW" 2>"$TMP.err"; then
+    echo "ru-block: nft отверг новый список, набор не тронут:" >&2
+    cut -c1-300 "$TMP.err" | head -n 5 >&2
+    exit 1
+fi
+nft -f "$NEW"
+
+install -m 0644 "$NEW" "$OUT"
+echo "ru-block: загружено $N сетей (было $OLD)"
 EOF
 ```
 
@@ -310,19 +452,22 @@ chmod 755 /usr/local/sbin/ru-block-update.sh
 ```
 
 ```
-/usr/local/sbin/ru-block-update.sh && journalctl -t ru-block -n 1 --no-pager
+/usr/local/sbin/ru-block-update.sh
 ```
 
-**ОЖИДАЕТСЯ:** `ru4: N подсетей` (тысячи).
+**ОЖИДАЕТСЯ:** `ru-block: загружено N сетей (было 0)` (тысячи). Любая строка
+"ничего не меняю" - защита сработала, набор остался прежним; причина - в той
+же строке.
 
-Обновление раз в сутки и после загрузки (после `flush ruleset` набор пуст):
+Обновление раз в неделю. После перезагрузки набор берётся из сохранённого
+`/etc/nftables.d/ru4.nft`, ждать обновления не нужно:
 
 ```
 tee /etc/systemd/system/ru-block-update.service > /dev/null <<'EOF'
 [Unit]
-Description=Fill ru4 set
-After=network-online.target nftables.service
+Description=Update nft set ru4 (Russian IP ranges)
 Wants=network-online.target
+After=network-online.target nftables.service
 
 [Service]
 Type=oneshot
@@ -333,11 +478,11 @@ EOF
 ```
 tee /etc/systemd/system/ru-block-update.timer > /dev/null <<'EOF'
 [Unit]
-Description=Fill ru4 set at boot and daily
+Description=Weekly update of Russian IP ranges for nft set ru4
 
 [Timer]
-OnBootSec=1min
-OnCalendar=daily
+OnCalendar=weekly
+RandomizedDelaySec=6h
 Persistent=true
 
 [Install]
@@ -1159,7 +1304,7 @@ sudo systemctl restart vpn-slot@vpn-backup vpn-slot@vpn-amz gw-routing
 | "Чебурнет"/"Дом" показывают IP VPS | `awg-who` - подключён не тот профиль? | переключить профиль на устройстве |
 | "Дом" подключён, интернета нет | `ip rule \| grep 5300`, `ip route show table 300`, рукопожатие `gw-backup` в `awg-who` | рестарт `awg-quick@awg1`; на шлюзе - Часть 4 |
 | российские сайты не открываются в VPN | так задумано (`reject` на `ru4`) | профиль "Чебурнет" |
-| `ru4` пуст после перезагрузки | `journalctl -t ru-block -n 5` | `systemctl start ru-block-update` |
+| `ru4` пуст после перезагрузки | `ls -l /etc/nftables.d/ru4.nft`, `grep -c include /etc/nftables.conf` | `systemctl start ru-block-update` (пишет файл заново) |
 | весь VPN-провайдер блокируют волнами | - | свой адрес, протокол 3.1, держать запасной выход (WARP) |
 | после перезагрузки VPS ни один клиент не подключается | `modinfo amneziawg` - `not found` | ядро обновилось без модуля: загрузить старое ядро (консоль хостера), затем 6.10.2 |
 | VPS заменили / переустановили, конфигов нет | `ls /var/backups/vps/` **на шлюзе** | восстановление из бэкапа (6.10.3) |

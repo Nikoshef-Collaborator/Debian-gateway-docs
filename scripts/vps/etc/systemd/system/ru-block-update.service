@@ -1,7 +1,7 @@
 [Unit]
-Description=Fill ru4 set
-After=network-online.target nftables.service
+Description=Update nft set ru4 (Russian IP ranges)
 Wants=network-online.target
+After=network-online.target nftables.service
 
 [Service]
 Type=oneshot
