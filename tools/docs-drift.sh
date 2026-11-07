@@ -51,7 +51,8 @@ fi
 
 ROLE="${1:-}"
 if [ -z "$ROLE" ]; then
-    if [ -d "$ROOT/etc/gateway" ]; then ROLE=gateway
+    # по главному файлу роли, а не по папке: /etc/gateway есть и на VPS (там лежит drift-local.conf)
+    if [ -f "$ROOT/etc/gateway/gateway.conf" ]; then ROLE=gateway
     elif [ -d "$ROOT/etc/amnezia/amneziawg" ]; then ROLE=vps
     else echo "не понять роль машины - укажи: gateway или vps"; exit 1; fi
 fi
