@@ -40,7 +40,7 @@ done < "$STATE"
 mv "${MANUAL_CONF}.new" "$MANUAL_CONF"
 if dnsmasq --test 2>&1 | grep -qi "syntax check OK"; then
     systemctl restart dnsmasq
-    cnt=$(grep -c '^nftset=' "$MANUAL_CONF" 2>/dev/null || echo 0)
+    cnt=$(grep -c '^nftset=' "$MANUAL_CONF" 2>/dev/null); cnt=${cnt:-0}   # grep -c сам печатает 0
     echo "OK: пересобрано, $cnt записей в $MANUAL_CONF"
     exit 0
 else
