@@ -26,7 +26,7 @@ esac
 [ "$(id -u)" -eq 0 ] || { echo "нужен root (sudo)"; exit 1; }
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
-tg() { [ -x "$TG" ] && "$TG" "Ночное обслуживание" "$1" "${2:-info}" >/dev/null 2>&1; return 0; }
+tg() { [ "$MODE" = check ] && return 0; [ -x "$TG" ] && "$TG" "Ночное обслуживание" "$1" "${2:-info}" >/dev/null 2>&1; return 0; }
 die() { log "СТОП: $1"; tg "СТОП: $1
 Перезагрузки НЕ будет, проверь вручную." crit; exit 1; }
 

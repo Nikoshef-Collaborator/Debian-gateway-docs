@@ -36,7 +36,7 @@ esac
 [ "$(id -u)" -eq 0 ] || [ -n "${ALLOW_NONROOT:-}" ] || { echo "нужен root (sudo)"; exit 1; }
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
-tg() { [ -x "$TG" ] && "$TG" "Immich: автообновление" "$1" "${2:-info}" >/dev/null 2>&1; return 0; }
+tg() { [ "$MODE" = check ] && return 0; [ -x "$TG" ] && "$TG" "Immich: автообновление" "$1" "${2:-info}" >/dev/null 2>&1; return 0; }
 # skip: условия не выполнены, ничего не менялось - предупреждение и выход без ошибки
 skip() { log "ПРОПУСК: $1"; tg "Пропущено: $1
 Ничего не изменено. Следующая попытка по расписанию." warn; exit 0; }
